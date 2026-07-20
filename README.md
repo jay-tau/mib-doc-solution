@@ -75,7 +75,7 @@ Deterministic, out of 150 points:
 
 ## Ground Rules
 
-- Use any coding agents or LLMs you like **while developing** — but the submitted solution must run with no LLMs, no VLMs, no API calls, and no network access. This must run on Cenauri I prime.
+- The submitted solution must run with no network access during runtime. This must run on Centauri I prime.
 - Your solution repository must include a `Dockerfile`, and the image must accept exactly two arguments:
 
 ```bash
