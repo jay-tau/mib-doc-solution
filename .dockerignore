@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+.DS_Store
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+tmp/
+output/
+data/train/
+data/validation/
+submissions/
+*.zip
+*.zip.sha256
