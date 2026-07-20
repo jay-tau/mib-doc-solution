@@ -72,35 +72,6 @@ python3 scripts/run_docker_submission.py \
 - No network access.
 - No API keys or external services.
 
-## Allowed
-
-- Tesseract or other offline OCR engines.
-- OpenCV, Pillow, Poppler, pdfium, and similar document/image tooling.
-- Hand-written rules and heuristics.
-- Classical machine learning.
-- Small task-specific local models that fit the artifact limits.
-- Candidate-trained models using the public training data.
-
-## Not Allowed
-
-- LLMs in the submitted runtime.
-- VLMs or multimodal foundation models in the submitted runtime.
-- Cloud OCR, document AI APIs, or any network service.
-- Runtime package downloads.
-- Calling out to a local daemon outside the container.
-- Hardcoding validation-set or private test-set answers.
-- Manual per-case output editing.
-
-## Why This Design
-
-The Docker/no-network contract creates a useful gradient:
-
-- a beginner can submit a small Python/Tesseract image and get a score
-- a solid engineer can build robust preprocessing, OCR fallbacks, and validators
-- a top engineer can build a full offline document pipeline with page classification, deskewing, evidence aggregation, uncertainty handling, and adversarial-text filtering
-
-The best submissions should win because of engineering quality, not because they had access to a better hosted model.
-
 ## Minimal Entrypoint
 
 A minimal `run.sh` inside a candidate repository can look like:
