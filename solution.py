@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Sequence
 
 from mib_pipeline import (
-    AdjudicatingCaseProcessor,
     AdjudicationEngine,
     BatchRunner,
     CalibrationArtifactError,
@@ -18,7 +17,11 @@ from mib_pipeline import (
     DocumentRenderer,
     EvidencePrecedenceResolver,
     GeneralizablePolicyExceptionStore,
+    OutputConfidenceRecalibrationProcessor,
+    OutputConfidenceRecalibrator,
     PolicyArtifactError,
+    RapidOutputRecoveryProcessor,
+    ReviewDenialRecoveryAdjudicator,
     VisibleEvidenceExtractor,
     discover_case_pdfs,
 )
@@ -86,15 +89,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         input_dir, output_path = parse_paths(arguments)
         runner = BatchRunner(
-            AdjudicatingCaseProcessor(
-                renderer=DocumentRenderer(),
-                extractor=VisibleEvidenceExtractor(),
-                linker=CaseLinker(),
-                resolver=EvidencePrecedenceResolver(),
-                adjudicator=AdjudicationEngine(
-                    calibrator=ConfidenceCalibrator.from_pinned_artifact(),
-                    exceptions=GeneralizablePolicyExceptionStore.from_pinned_artifact(),
+            OutputConfidenceRecalibrationProcessor(
+                processor=RapidOutputRecoveryProcessor(
+                    renderer=DocumentRenderer(),
+                    primary_extractor=VisibleEvidenceExtractor(
+                        packet_page_type_markers=True,
+                    ),
+                    linker=CaseLinker(),
+                    resolver=EvidencePrecedenceResolver(),
+                    adjudicator=ReviewDenialRecoveryAdjudicator(
+                        AdjudicationEngine(
+                            calibrator=ConfidenceCalibrator.from_pinned_artifact(),
+                            exceptions=GeneralizablePolicyExceptionStore.from_pinned_artifact(),
+                        )
+                    ),
                 ),
+                recalibrator=OutputConfidenceRecalibrator.from_pinned_artifact(),
             ),
             max_workers=configured_worker_limit(),
         )

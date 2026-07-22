@@ -50,10 +50,15 @@ python3 scripts/validate_submission.py --submission /tmp/mib-output/predictions.
 
 `examples/offline_baseline/` is a tiny format-valid submission you can use to test the plumbing.
 
-The repository root also contains the production-oriented offline runtime
-scaffold. See [`RUNTIME.md`](RUNTIME.md) for its clean-checkout build command,
-the exact constrained Docker invocation, and the boundary between WO-1 and the
-downstream case-processing work.
+The repository root also contains the production-oriented offline runtime. Its
+visible-pixel Tesseract path remains authoritative, with fail-closed RapidOCR
+recovery and frozen, identity-free evidence guards for genuinely unresolved
+fields or low-confidence review decisions. A final confidence-only calibration
+stage cannot modify the extracted record or adjudication. See
+[`RUNTIME.md`](RUNTIME.md) for the clean-checkout build command, exact
+constrained Docker invocation, offline model details, and recovery safety
+boundary. Third-party OCR model provenance and licenses are retained under
+[`third_party_licenses/`](third_party_licenses/README.md).
 
 ## Output Format
 
