@@ -21,7 +21,6 @@ from mib_pipeline import (
     OutputConfidenceRecalibrator,
     PolicyArtifactError,
     RapidOutputRecoveryProcessor,
-    ReviewDenialRecoveryAdjudicator,
     VisibleEvidenceExtractor,
     discover_case_pdfs,
 )
@@ -92,16 +91,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             OutputConfidenceRecalibrationProcessor(
                 processor=RapidOutputRecoveryProcessor(
                     renderer=DocumentRenderer(),
-                    primary_extractor=VisibleEvidenceExtractor(
-                        packet_page_type_markers=True,
-                    ),
+                    primary_extractor=VisibleEvidenceExtractor(),
                     linker=CaseLinker(),
                     resolver=EvidencePrecedenceResolver(),
-                    adjudicator=ReviewDenialRecoveryAdjudicator(
-                        AdjudicationEngine(
-                            calibrator=ConfidenceCalibrator.from_pinned_artifact(),
-                            exceptions=GeneralizablePolicyExceptionStore.from_pinned_artifact(),
-                        )
+                    adjudicator=AdjudicationEngine(
+                        calibrator=ConfidenceCalibrator.from_pinned_artifact(),
+                        exceptions=GeneralizablePolicyExceptionStore.from_pinned_artifact(),
                     ),
                 ),
                 recalibrator=OutputConfidenceRecalibrator.from_pinned_artifact(),

@@ -10,7 +10,6 @@ from mib_pipeline.rapid_recovery import (
     AUTHORITATIVE_RAPID_DECISION_CONFIDENCE,
     RapidOcrEngine,
     RapidOutputRecoveryProcessor,
-    REVIEW_APPROVAL_CONFIDENCE,
     SEMANTIC_DENIAL_CONFIDENCE,
     XW1_MULTISOURCE_REVIEW_APPROVAL_CONFIDENCE,
 )
@@ -1878,8 +1877,8 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(rapid_result.adjudication, "NEEDS_REVIEW")
         self.assertEqual(rapid_result.confidence, 0.25)
 
-    def test_frozen_review_approval_head_matches_each_early_return_branch(self):
-        six_applicant_candidates = tuple(
+    def test_packet_shape_never_approves_a_review(self):
+        six_names = tuple(
             evidence("applicant_name", APPLICANT, page=page)
             for page in range(6)
         )
@@ -1889,370 +1888,51 @@ class RapidOutputRecoveryTests(unittest.TestCase):
             evidence_type=EvidenceType.BIOMETRIC_SLIP,
         )
         paid_fee = evidence("fee_status", "paid")
-        branches = {
-            "six_primary_applicant_candidates": {
-                "prediction": row(arrival_date="2026-04-27"),
-                "candidates": six_applicant_candidates,
-                "review_reasons": ("test_review",),
-                "approval_facts": (),
-            },
-            "clean_bio_and_age_over_71_days": {
-                "prediction": row(arrival_date="2026-04-26"),
-                "candidates": (),
-                "review_reasons": ("test_review",),
-                "approval_facts": ("no_visible_biohazard_risk",),
-            },
-            "required_sponsor_unknown_and_age_at_most_48_days": {
-                "prediction": row(arrival_date="2026-05-20"),
-                "candidates": (),
-                "review_reasons": ("required_sponsor_unknown",),
-                "approval_facts": (),
-            },
-        }
-
-        for label, values in branches.items():
-            with self.subTest(label=label):
-                primary_row = values["prediction"]
-                recovery, _renderer, _linker, _resolver, _adjudicator, factory = (
-                    processor(
-                        resolved_case(
-                            considered={
-                                "risk_flags": (clean_risk,),
-                                "fee_status": (paid_fee,),
-                            },
-                        ),
-                        resolved_case(),
-                        primary_outcome=outcome(
-                            primary_row,
-                            review_reasons=values["review_reasons"],
-                            approval_facts=values["approval_facts"],
-                        ),
-                        primary_candidates=(
-                            values["candidates"] + (clean_risk, paid_fee)
-                        ),
-                    )
-                )
-
-                result = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-                expected = primary_row.to_dict()
-                expected.update(
-                    {
-                        "adjudication": "APPROVED",
-                        "confidence": REVIEW_APPROVAL_CONFIDENCE,
-                    }
-                )
-                self.assertEqual(result.to_dict(), expected)
-                self.assertEqual(factory.calls, 0)
-
-    def test_review_approval_head_enforces_strict_boundaries_and_common_guards(self):
-        five_applicant_candidates = tuple(
-            evidence("applicant_name", APPLICANT, page=page)
-            for page in range(5)
+        cases = (
+            (
+                row(arrival_date="1900-01-01"),
+                six_names,
+                (
+                    "arrival_date_unknown",
+                    "required_output_unknown:arrival_date",
+                ),
+                (),
+            ),
+            (
+                row(arrival_date="2026-04-26"),
+                (),
+                ("test_review",),
+                ("no_visible_biohazard_risk",),
+            ),
+            (
+                row(sponsor_id="SPN-0000", arrival_date="2026-05-20"),
+                (),
+                ("required_sponsor_unknown",),
+                (),
+            ),
         )
-        six_applicant_candidates = five_applicant_candidates + (
-            evidence("applicant_name", APPLICANT, page=5),
-        )
-        variants = {
-            "candidate_count_must_exceed_five": {
-                "prediction": row(),
-                "candidates": five_applicant_candidates,
-                "review_reasons": ("test_review",),
-                "approval_facts": (),
-            },
-            "older_boundary_is_strict": {
-                "prediction": row(arrival_date="2026-04-27"),
-                "candidates": (),
-                "review_reasons": ("test_review",),
-                "approval_facts": ("no_visible_biohazard_risk",),
-            },
-            "recent_boundary_rejects_49_days": {
-                "prediction": row(arrival_date="2026-05-19"),
-                "candidates": (),
-                "review_reasons": ("required_sponsor_unknown",),
-                "approval_facts": (),
-            },
-            "invalid_date_abstains": {
-                "prediction": row(arrival_date="not-a-date"),
-                "candidates": (),
-                "review_reasons": ("required_sponsor_unknown",),
-                "approval_facts": ("no_visible_biohazard_risk",),
-            },
-            "risk_must_normalize_to_none": {
-                "prediction": row(risk_flags="illegible_biometrics"),
-                "candidates": six_applicant_candidates,
-                "review_reasons": ("test_review",),
-                "approval_facts": (),
-            },
-            "final_decision_must_remain_review": {
-                "prediction": row(adjudication="DENIED", confidence=0.61),
-                "candidates": six_applicant_candidates,
-                "review_reasons": ("test_review",),
-                "approval_facts": (),
-            },
-        }
 
-        for label, values in variants.items():
-            with self.subTest(label=label):
-                primary_row = values["prediction"]
+        for primary_row, candidates, review_reasons, approval_facts in cases:
+            with self.subTest(review_reasons=review_reasons):
                 recovery, *_rest = processor(
-                    resolved_case(),
+                    resolved_case(
+                        considered={
+                            "risk_flags": (clean_risk,),
+                            "fee_status": (paid_fee,),
+                        },
+                    ),
                     resolved_case(),
                     primary_outcome=outcome(
                         primary_row,
-                        review_reasons=values["review_reasons"],
-                        approval_facts=values["approval_facts"],
+                        review_reasons=review_reasons,
+                        approval_facts=approval_facts,
                     ),
-                    primary_candidates=values["candidates"],
+                    primary_candidates=candidates + (clean_risk, paid_fee),
                 )
 
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
                 self.assertEqual(result, primary_row)
-
-        missing_risk_row = row(risk_flags="none")
-        recovery, *_rest = processor(
-            resolved_case(unknown={"risk_flags"}),
-            resolved_case(),
-            primary_outcome=outcome(
-                missing_risk_row,
-                review_reasons=(
-                    "required_output_unknown:risk_flags",
-                    "risk_flags_unknown",
-                ),
-            ),
-            primary_candidates=six_applicant_candidates,
-        )
-
-        self.assertEqual(
-            recovery.process_case(Path(CASE_ID + ".pdf")),
-            missing_risk_row,
-        )
-
-        normalized_risk_row = row(risk_flags="NoNe")
-        clean_risk = evidence(
-            "risk_flags",
-            "none",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-        )
-        paid_fee = evidence("fee_status", "paid")
-        recovery, *_rest = processor(
-            resolved_case(
-                considered={
-                    "risk_flags": (clean_risk,),
-                    "fee_status": (paid_fee,),
-                },
-            ),
-            resolved_case(),
-            primary_outcome=outcome(normalized_risk_row),
-            primary_candidates=six_applicant_candidates + (clean_risk, paid_fee),
-        )
-
-        normalized_risk = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(normalized_risk.adjudication, "APPROVED")
-        self.assertEqual(
-            normalized_risk.confidence,
-            REVIEW_APPROVAL_CONFIDENCE,
-        )
-
-    def test_review_approval_head_vetoes_contested_resolution(self):
-        six_names = tuple(
-            evidence("applicant_name", APPLICANT, page=page)
-            for page in range(6)
-        )
-        clean_risk = evidence(
-            "risk_flags",
-            "none",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-        )
-        paid_fee = evidence("fee_status", "paid")
-        considered = {
-            "risk_flags": (clean_risk,),
-            "fee_status": (paid_fee,),
-        }
-        recovery, *_rest = processor(
-            resolved_case(
-                contested={"home_world"},
-                considered=considered,
-            ),
-            resolved_case(),
-            primary_candidates=six_names + (clean_risk, paid_fee),
-        )
-
-        self.assertEqual(
-            recovery.process_case(Path(CASE_ID + ".pdf")),
-            row(),
-        )
-
-    def test_review_approval_head_runs_after_rapid_output_recovery(self):
-        six_applicant_candidates = tuple(
-            evidence("applicant_name", APPLICANT, page=page)
-            for page in range(6)
-        )
-        clean_risk = evidence(
-            "risk_flags",
-            "none",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-        )
-        paid_fee = evidence("fee_status", "paid")
-        primary = resolved_case(
-            unknown={"species_code"},
-            considered={
-                "risk_flags": (clean_risk,),
-                "fee_status": (paid_fee,),
-            },
-        )
-        rapid = resolved_case(values={"species_code": "ARCTURIAN"})
-        recovery, _renderer, _linker, _resolver, _adjudicator, factory = (
-            processor(
-                primary,
-                rapid,
-                primary_candidates=(
-                    six_applicant_candidates + (clean_risk, paid_fee)
-                ),
-            )
-        )
-
-        result = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(result.species_code, "ARCTURIAN")
-        self.assertEqual(result.adjudication, "APPROVED")
-        self.assertEqual(result.confidence, REVIEW_APPROVAL_CONFIDENCE)
-        self.assertEqual(factory.calls, 1)
-
-    def test_review_approval_rejects_contested_risk_and_untrusted_fee(self):
-        six_names = tuple(
-            evidence("applicant_name", APPLICANT, page=page)
-            for page in range(6)
-        )
-        paid_fee = evidence("fee_status", "paid")
-        clean_risk = evidence(
-            "risk_flags",
-            "none",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-        )
-        active_risk = evidence(
-            "risk_flags",
-            "active_warrant",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-        )
-        primary = resolved_case(
-            unknown={"species_code"},
-            contested={"risk_flags"},
-            considered={
-                "risk_flags": (clean_risk, active_risk),
-                "fee_status": (paid_fee,),
-            },
-        )
-        rapid = resolved_case(
-            values={"species_code": "ARCTURIAN", "risk_flags": "none"},
-            considered={"risk_flags": (clean_risk,)},
-        )
-        recovery, *_rest = processor(
-            primary,
-            rapid,
-            primary_candidates=six_names + (clean_risk, active_risk, paid_fee),
-            rapid_candidates=(clean_risk,),
-        )
-
-        contested = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(contested.adjudication, "NEEDS_REVIEW")
-
-        hidden_unpaid = evidence(
-            "fee_status",
-            "unpaid",
-            evidence_type=EvidenceType.TEXT_LAYER,
-            source="text_layer",
-        )
-        primary = resolved_case(
-            values={"fee_status": "unpaid"},
-            considered={
-                "risk_flags": (clean_risk,),
-                "fee_status": (hidden_unpaid,),
-            },
-        )
-        primary_row = row(fee_status="unpaid")
-        recovery, *_rest = processor(
-            primary,
-            resolved_case(),
-            primary_outcome=outcome(primary_row),
-            primary_candidates=six_names + (clean_risk, hidden_unpaid),
-        )
-
-        untrusted_fee = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(untrusted_fee, primary_row)
-
-    def test_review_approval_head_preserves_authority_and_denial_precedence(self):
-        six_applicant_candidates = tuple(
-            evidence("applicant_name", APPLICANT, page=page)
-            for page in range(6)
-        )
-        authoritative_primary = outcome(
-            row(),
-            review_reasons=("authoritative_visible_decision",),
-            authoritative_source=True,
-        )
-        recovery, *_rest = processor(
-            resolved_case(),
-            resolved_case(),
-            primary_outcome=authoritative_primary,
-            primary_candidates=six_applicant_candidates,
-        )
-
-        primary_result = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(primary_result.adjudication, "NEEDS_REVIEW")
-        self.assertEqual(primary_result.confidence, 0.37)
-
-        authoritative_rapid_review = evidence(
-            "adjudication",
-            "NEEDS_REVIEW",
-            evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
-            confidence=0.95,
-        )
-        primary = resolved_case(unknown={"species_code"})
-        rapid = resolved_case(values={"species_code": "ARCTURIAN"})
-        recovery, *_rest = processor(
-            primary,
-            rapid,
-            primary_candidates=six_applicant_candidates,
-            rapid_candidates=(authoritative_rapid_review,),
-        )
-
-        rapid_result = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(rapid_result.adjudication, "NEEDS_REVIEW")
-        self.assertEqual(rapid_result.confidence, 0.37)
-
-        risk_anchor = evidence("risk_flags", None, applicant=None)
-        recovered_risk = evidence(
-            "risk_flags",
-            "active_warrant",
-            evidence_type=EvidenceType.BIOMETRIC_SLIP,
-            applicant=None,
-        )
-        primary = resolved_case(
-            unknown={"risk_flags"},
-            considered={"risk_flags": (risk_anchor,)},
-        )
-        rapid = resolved_case(
-            values={"risk_flags": "active_warrant"},
-            considered={"risk_flags": (recovered_risk,)},
-        )
-        recovery, *_rest = processor(
-            primary,
-            rapid,
-            primary_candidates=six_applicant_candidates + (risk_anchor,),
-            rapid_candidates=(recovered_risk,),
-        )
-
-        denied = recovery.process_case(Path(CASE_ID + ".pdf"))
-
-        self.assertEqual(denied.adjudication, "DENIED")
-        self.assertEqual(denied.confidence, SEMANTIC_DENIAL_CONFIDENCE)
 
     def test_authoritative_conflict_or_bad_scope_abstains(self):
         primary = resolved_case(unknown={"fee_status"})

@@ -72,16 +72,6 @@ class CandidateEvidence:
     applicant_hint: str | None = None
 
 
-# Packet topology is policy-only visible evidence.  Keep the marker field
-# names separate so pages of different types cannot create a same-rank value
-# conflict in the resolver.
-PAGE_TYPE_MARKER_FIELDS = {
-    "fee_receipt": "page_type_present_fee_receipt",
-    "other": "page_type_present_other",
-    "sponsor_attestation": "page_type_present_sponsor_attestation",
-}
-
-
 class RefinementModel(Protocol):
     def refine(
         self,
@@ -762,7 +752,6 @@ class VisibleEvidenceExtractor:
         trusted_scope_repair: bool | None = None,
         risk_flag_retry: bool | None = None,
         risk_flag_ocr_engines: tuple[Any, Any, Any] | None = None,
-        packet_page_type_markers: bool = False,
     ) -> None:
         if not 0.0 <= minimum_legible_confidence <= refinement_gate <= 1.0:
             raise ValueError("confidence thresholds must satisfy 0 <= minimum <= gate <= 1")
@@ -837,10 +826,6 @@ class VisibleEvidenceExtractor:
         ):
             raise ValueError("risk flag retry requires exactly three OCR engines")
         self._risk_flag_ocr_engines = risk_flag_ocr_engines
-        # Only the production primary extractor needs policy topology.  Keep
-        # it opt-in so secondary OCR passes and generic extraction consumers
-        # retain their original field-candidate contract.
-        self._packet_page_type_markers = packet_page_type_markers
 
     @staticmethod
     def _page_image(page: RenderedPage) -> Any:
@@ -849,81 +834,6 @@ class VisibleEvidenceExtractor:
         except ImportError as exc:
             raise RecoverableOcrError("Pillow is required for visible extraction") from exc
         return Image.open(io.BytesIO(page.image_png)).convert("L")
-
-    @staticmethod
-    def packet_page_type(lines: Iterable[OcrLine]) -> str:
-        """Classify a page from only its first four visible OCR lines.
-
-        This intentionally mirrors the label-blind feature definition used to
-        freeze the review-recovery rules.  It does not use the filename, case
-        identity, applicant identity, later page text, or PDF text layer.
-        """
-
-        heading = " ".join(line.text for line in tuple(lines)[:4]).casefold()
-        if "manual adjudicator note" in heading or "signed manual note" in heading:
-            return "signed_manual_note"
-        if "adjudicator stamp" in heading or "official stamp" in heading:
-            return "adjudicator_stamp"
-        if "biometric" in heading or "form b-13" in heading or "form b 13" in heading:
-            return "biometric_slip"
-        if "sponsor attestation" in heading or "sponsor letter" in heading:
-            return "sponsor_attestation"
-        if "registry extract" in heading or "registry record" in heading:
-            return "registry_extract"
-        if "fee receipt" in heading:
-            return "fee_receipt"
-        if (
-            "form i-8090" in heading
-            or "form i 8090" in heading
-            or "work authorization intake" in heading
-            or "primary intake record" in heading
-        ):
-            return "intake_form"
-        return "other"
-
-    @classmethod
-    def _packet_page_type_marker(
-        cls,
-        *,
-        page: RenderedPage,
-        lines: tuple[OcrLine, ...],
-        case_id: str | None,
-    ) -> CandidateEvidence | None:
-        """Create one visible, packet-scoped marker for a mined page type."""
-
-        page_type = cls.packet_page_type(lines)
-        field_name = PAGE_TYPE_MARKER_FIELDS.get(page_type)
-        if field_name is None:
-            return None
-        heading_lines = lines[:4]
-        if heading_lines:
-            marker_box = heading_lines[0].box
-            for line in heading_lines[1:]:
-                marker_box = marker_box.union(line.box)
-            confidence = min(line.confidence for line in heading_lines)
-        else:
-            # An existing rendered page with no readable heading is the exact
-            # ``other`` bucket used by the frozen first-four-lines feature.
-            marker_box = page.crop_box
-            confidence = 1.0
-        return CandidateEvidence(
-            field_name=field_name,
-            value="present",
-            evidence_type=(
-                EvidenceType.SPONSOR_ATTESTATION
-                if page_type == "sponsor_attestation"
-                else EvidenceType.INTAKE_FORM
-            ),
-            page_index=page.index,
-            box=marker_box,
-            legible=True,
-            superseded=False,
-            ocr_confidence=confidence,
-            visual_cues=(f"packet_page_type:{page_type}",),
-            source="visible_ocr",
-            case_id_hint=case_id,
-            applicant_hint=None,
-        )
 
     @staticmethod
     def _evidence_type(text: str, current: EvidenceType) -> EvidenceType:
@@ -988,7 +898,9 @@ class VisibleEvidenceExtractor:
         normalized = re.sub(r"^[^A-Za-z0-9]+", "", normalized)
         correction = re.match(
             r"^manual\s+correction\s*:\s*"
-            r"(applicant|sponsor|visa\s+class|fee\s+status)\s+is\s+"
+            r"(applicant|sponsor|species(?:\s+code)?|home\s+world|"
+            r"visa\s+class|arrival\s+date|(?:declared\s+)?purpose|"
+            r"fee\s+status)\s+is\s+"
             r"(.+?)(?:\.\s*(?:sample\s+denial)?|\s+sample\s+denial|$)",
             normalized,
             re.I,
@@ -997,7 +909,13 @@ class VisibleEvidenceExtractor:
             correction_fields = {
                 "applicant": "applicant_name",
                 "sponsor": "sponsor_id",
+                "species": "species_code",
+                "species code": "species_code",
+                "home world": "home_world",
                 "visa class": "visa_class",
+                "arrival date": "arrival_date",
+                "purpose": "declared_purpose",
+                "declared purpose": "declared_purpose",
                 "fee status": "fee_status",
             }
             label = " ".join(correction.group(1).casefold().split())
@@ -3567,7 +3485,6 @@ class VisibleEvidenceExtractor:
 
     def extract(self, rendered_case: RenderedCase) -> tuple[CandidateEvidence, ...]:
         candidates: list[CandidateEvidence] = []
-        page_type_markers: list[CandidateEvidence] = []
         pending_note_decisions: list[CandidateEvidence] = []
         routing_lines: dict[int, tuple[OcrLine, ...]] = {}
         risk_observations: list[
@@ -3600,17 +3517,6 @@ class VisibleEvidenceExtractor:
                 current_case_id = next(iter(visible_case_ids))
             else:
                 current_case_id = None
-            if self._packet_page_type_markers:
-                page_type_marker = self._packet_page_type_marker(
-                    page=page,
-                    lines=lines,
-                    # A topology marker describes a physical page in the
-                    # input packet. The already-validated filename association
-                    # scopes it even when the page omits the case ID.
-                    case_id=rendered_case.case_id,
-                )
-                if page_type_marker is not None:
-                    page_type_markers.append(page_type_marker)
             current_applicant: str | None = None
             page_image = self._page_image(page)
             page_visual = (
@@ -4143,5 +4049,4 @@ class VisibleEvidenceExtractor:
         )
         if marker is not None:
             candidates.append(marker)
-        candidates.extend(page_type_markers)
         return tuple(candidates)

@@ -260,12 +260,23 @@ class VisibleEvidenceTests(unittest.TestCase):
         )
 
     def test_manual_correction_and_sponsor_narrative_are_structured(self):
-        self.assertEqual(
-            VisibleEvidenceExtractor._match_field(
-                "Manual correction: visa class is XW-2. SAMPLE DENIAL"
-            ),
-            ("visa_class", "XW-2"),
-        )
+        corrections = {
+            "visa class is XW-2": ("visa_class", "XW-2"),
+            "species is ARCTURIAN": ("species_code", "ARCTURIAN"),
+            "species code is ARCTURIAN": ("species_code", "ARCTURIAN"),
+            "home world is Kepler-186f": ("home_world", "Kepler-186f"),
+            "arrival date is 2026-04-17": ("arrival_date", "2026-04-17"),
+            "purpose is research": ("declared_purpose", "research"),
+            "declared purpose is research": ("declared_purpose", "research"),
+        }
+        for correction, expected in corrections.items():
+            with self.subTest(correction=correction):
+                self.assertEqual(
+                    VisibleEvidenceExtractor._match_field(
+                        f"Manual correction: {correction}. SAMPLE DENIAL"
+                    ),
+                    expected,
+                )
         self.assertEqual(
             VisibleEvidenceExtractor._sponsor_narrative_matches(
                 "Sponsor SPN-6818 attests that Miraquell Qorul is expected on "

@@ -39,11 +39,6 @@ from .confidence import (
     DecisionSignalModel,
     PinnedIsotonicMap,
 )
-from .decision_recovery import (
-    REVIEW_APPROVAL_CONFIDENCE,
-    REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE,
-    ReviewDenialRecoveryAdjudicator,
-)
 from .resolution import (
     CaseLinker,
     EvidencePrecedenceHierarchy,
@@ -109,8 +104,6 @@ __all__ = [
     "ProcessingPipeline",
     "RecoverableRenderError",
     "RecoverableOcrError",
-    "REVIEW_APPROVAL_CONFIDENCE",
-    "REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE",
     "RAPID_OUTPUT_FIELDS",
     "RapidOcrEngine",
     "RapidOutputRecoveryProcessor",
@@ -122,7 +115,6 @@ __all__ = [
     "ResolveThenFallbackProcessor",
     "ResolvedCase",
     "ResolvedField",
-    "ReviewDenialRecoveryAdjudicator",
     "RowValidationError",
     "SafeFallbackProcessor",
     "TextLayerReader",

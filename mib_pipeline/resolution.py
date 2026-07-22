@@ -21,9 +21,6 @@ POLICY_ONLY_FIELDS = (
     "diplomatic_note",
     "minimal_diplomatic_packet",
     "work_permit_requested",
-    "page_type_present_fee_receipt",
-    "page_type_present_other",
-    "page_type_present_sponsor_attestation",
 )
 
 # These values describe the case packet rather than establishing identity.

@@ -4,10 +4,11 @@ The primary Tesseract pass remains the source of case scope, policy, and
 confidence.  RapidOCR is a second, independently resolved reading of the same
 rendered pixels.  It may fill only primary ``FieldState.UNKNOWN`` output
 values.  One frozen semantic head may turn a remaining review into a denial
-when those newly visible values establish a published disqualifier; it never
-creates an approval.  One separate frozen tie-breaker may repair only the
-serialized applicant name when the already-extracted primary evidence
-contains one stronger, exact-case biometric value.
+when those newly visible values establish a published disqualifier.  One
+audited rule may approve only a complete, exact-case XW-1 review corroborated
+by independent structured sources.  A frozen tie-breaker may repair only the
+serialized applicant name when the already-extracted primary evidence has one
+stronger, exact-case biometric value.
 """
 
 from __future__ import annotations
@@ -64,7 +65,6 @@ BIOMETRIC_APPLICANT_MINIMUM_CONFIDENCE = 0.80
 SOURCE_PRIORITY_MINIMUM_CONFIDENCE = 0.90
 RAPID_BAD_CUES = frozenset({"strikethrough", "sample_denial_watermark"})
 SEMANTIC_DENIAL_CONFIDENCE = 0.9166666666666666
-REVIEW_APPROVAL_CONFIDENCE = 0.80
 XW1_MULTISOURCE_REVIEW_APPROVAL_CONFIDENCE = 0.98
 XW1_MULTISOURCE_COMPLETE_REVIEW_RECOVERY = (
     "xw1_multisource_complete_review_recovery"
@@ -81,7 +81,6 @@ _COMPLETE_REVIEW_OUTPUT_FIELDS = (
     "fee_status",
 )
 _INCOMPLETE_REVIEW_VALUES = frozenset({"", "unknown", "null"})
-_REVIEW_APPROVAL_SNAPSHOT_DATE = date(2026, 7, 7)
 SEMANTIC_POLICY_RULES = PolicyRuleSet()
 SEMANTIC_EVIDENCE_FIELDS = frozenset(
     {
@@ -623,19 +622,6 @@ class RapidOutputRecoveryProcessor:
             return None
         return field.value
 
-    @staticmethod
-    def _review_approval_arrival_age(value: str) -> int | None:
-        """Return the frozen snapshot age for one exact ISO arrival date."""
-
-        try:
-            normalized = value.strip()
-            if normalized == "1900-01-01":
-                return None
-            arrival = date.fromisoformat(normalized)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        return (_REVIEW_APPROVAL_SNAPSHOT_DATE - arrival).days
-
     @classmethod
     def _visible_approval_value(
         cls,
@@ -721,102 +707,6 @@ class RapidOutputRecoveryProcessor:
                     or value("hardship_waiver") == "valid"
                 )
             )
-        )
-
-    @classmethod
-    def _review_approval_head(
-        cls,
-        *,
-        final_row: PredictionRow,
-        primary_candidates: Iterable[CandidateEvidence],
-        primary_outcome: AdjudicationOutcome,
-        primary_resolved: ResolvedCase,
-        rapid_candidates: Iterable[CandidateEvidence] = (),
-        rapid_resolved: ResolvedCase | None = None,
-    ) -> PredictionRow:
-        """Apply the frozen identity-free three-branch review approval head.
-
-        Existing primary or Rapid authority always vetoes this lower-precedence
-        statistical recovery. Every branch requires trusted clean-risk and
-        policy-valid fee evidence; the first branch otherwise uses only the
-        count of primary applicant candidates.
-        """
-
-        trace = primary_outcome.trace
-        if (
-            final_row.adjudication != "NEEDS_REVIEW"
-            or primary_outcome.row.adjudication != "NEEDS_REVIEW"
-            or trace.decision != "NEEDS_REVIEW"
-            or trace.denial_reasons
-            or primary_resolved.unresolved_linkage
-            or primary_resolved.contested_fields
-            or " ".join(final_row.risk_flags.strip().split()).casefold()
-            != "none"
-            or not cls._visible_clean_risk(
-                primary_candidates=primary_candidates,
-                primary_resolved=primary_resolved,
-                rapid_candidates=rapid_candidates,
-                rapid_resolved=rapid_resolved,
-            )
-            or not cls._visible_valid_fee(
-                final_row=final_row,
-                primary_candidates=primary_candidates,
-                primary_resolved=primary_resolved,
-                rapid_candidates=rapid_candidates,
-                rapid_resolved=rapid_resolved,
-            )
-            or cls._primary_authoritative_decision(primary_outcome)
-            or (
-                rapid_resolved is not None
-                and cls._has_authoritative_rapid_decision(
-                    case_id=primary_resolved.case_id,
-                    primary_resolved=primary_resolved,
-                    rapid_resolved=rapid_resolved,
-                    rapid_candidates=rapid_candidates,
-                )
-            )
-            or (
-                rapid_resolved is not None
-                and (
-                    rapid_resolved.case_id != primary_resolved.case_id
-                    or rapid_resolved.unresolved_linkage
-                    or rapid_resolved.contested_fields
-                )
-            )
-        ):
-            return final_row
-
-        applicant_candidate_count = sum(
-            isinstance(candidate, CandidateEvidence)
-            and candidate.field_name == "applicant_name"
-            for candidate in primary_candidates
-        )
-        arrival_age = cls._review_approval_arrival_age(
-            final_row.arrival_date
-        )
-        matches = bool(
-            applicant_candidate_count > 5
-            or (
-                arrival_age is not None
-                and arrival_age > 71
-                and "no_visible_biohazard_risk"
-                in trace.approval_facts
-            )
-            or (
-                arrival_age is not None
-                and arrival_age <= 48
-                and "required_sponsor_unknown" in trace.review_reasons
-            )
-        )
-        if not matches:
-            return final_row
-
-        payload = final_row.to_dict()
-        payload["adjudication"] = "APPROVED"
-        payload["confidence"] = REVIEW_APPROVAL_CONFIDENCE
-        return PredictionRow.from_mapping(
-            payload,
-            fallback_case_id=final_row.case_id,
         )
 
     @staticmethod
@@ -1080,20 +970,10 @@ class RapidOutputRecoveryProcessor:
         rapid_candidates: Iterable[CandidateEvidence] = (),
         rapid_resolved: ResolvedCase | None = None,
     ) -> PredictionRow:
-        """Run the conservative audited rule before the frozen broad head."""
+        """Run the conservative audited review approval rule."""
 
-        primary_candidates = tuple(primary_candidates)
-        rapid_candidates = tuple(rapid_candidates)
-        recovered = cls._xw1_multisource_complete_review_recovery(
+        return cls._xw1_multisource_complete_review_recovery(
             final_row=final_row,
-            primary_candidates=primary_candidates,
-            primary_outcome=primary_outcome,
-            primary_resolved=primary_resolved,
-            rapid_candidates=rapid_candidates,
-            rapid_resolved=rapid_resolved,
-        )
-        return cls._review_approval_head(
-            final_row=recovered,
             primary_candidates=primary_candidates,
             primary_outcome=primary_outcome,
             primary_resolved=primary_resolved,
