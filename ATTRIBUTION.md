@@ -13,6 +13,10 @@ This fork adds organizer-compatible runtime fixes and conservative
 post-recovery adjudication safeguards. It does not copy another participant's
 validation predictions.
 
+Exact fee-token OCR repairs were informed by Yusuf Afifi's public MIT-licensed
+[`afifi-yusuf/mib-doc-solution`](https://github.com/afifi-yusuf/mib-doc-solution)
+at commit `2e6c4b2499040b3615a13331a0c4101c2aa98e23`.
+
 Bundled OCR models and other third-party components retain their own notices,
 provenance, checksums, and license texts in
 [`third_party_licenses/`](third_party_licenses/README.md).

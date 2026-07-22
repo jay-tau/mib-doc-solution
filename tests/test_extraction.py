@@ -122,7 +122,12 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertEqual(normalize("packet_receipt_date", "04/20/2026"), "2026-04-20")
         self.assertEqual(normalize("arrival_date", "2028-04-20"), "2026-04-20")
         self.assertEqual(normalize("biohazard_check", "GREEN / clean"), "clean")
+        self.assertEqual(normalize("biohazard_check", "not clean - RED"), "red")
         self.assertEqual(normalize("hardship_waiver", "approved"), "valid")
+        self.assertEqual(
+            normalize("hardship_waiver", "no valid hardship waiver"),
+            "invalid",
+        )
         self.assertEqual(
             normalize("diplomatic_waiver_code", "DIP-WAIVER"),
             "valid",
@@ -215,6 +220,14 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertEqual(normalize("declared_purpose", "xenchotany"), "xenobotany")
         self.assertEqual(normalize("fee_status", "pad"), "paid")
         self.assertEqual(normalize("fee_status", "pold"), "paid")
+        for raw, expected in {
+            "pal": "paid",
+            "pag": "paid",
+            "pac": "paid",
+            "umpaid": "unpaid",
+        }.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize("fee_status", raw), expected)
         self.assertEqual(
             normalize("applicant_name", "Mirequell Qcrul"),
             "Miraquell Qorul",
@@ -618,6 +631,29 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertTrue(
             all(item.evidence_type is EvidenceType.INTAKE_FORM for item in candidates)
         )
+
+    def test_body_phrase_cannot_promote_intake_decision_to_authoritative(self):
+        tokens = [
+            token("FORM I-8090: Work Authorization Intake", 1),
+            token("Case ID: MIB-000001", 2),
+            token("Applicant Name: Zed Zarnax", 3),
+            token("Attach the official stamp separately", 4),
+            token("Fee Status: unpaid", 5),
+            token("Decision: APPROVED", 6),
+        ]
+        extractor = VisibleEvidenceExtractor(
+            ocr_engine=FakeOcrEngine(tokens),
+            cue_detector=NoCueDetector(),
+        )
+
+        candidates = extractor.extract(self.rendered_case())
+        decision = next(
+            candidate
+            for candidate in candidates
+            if candidate.field_name == "adjudication"
+        )
+
+        self.assertIs(decision.evidence_type, EvidenceType.INTAKE_FORM)
 
     def test_sparse_table_cells_are_paired_in_visual_reading_order(self):
         tokens = [
@@ -1992,6 +2028,73 @@ class VisibleEvidenceTests(unittest.TestCase):
         ]
         self.assertEqual(len(risk_candidates), 1)
         self.assertEqual(risk_candidates[0].case_id_hint, "MIB-000999")
+
+    def test_risk_aggregation_preserves_applicant_and_source_precedence(self):
+        primary = PageFakeOcrEngine(
+            {
+                0: (
+                    token("FORM I-8090: Work Authorization Intake", 1),
+                    token("Case ID: MIB-000001", 2),
+                    token("Applicant Name: Miraquell Qorul", 3),
+                    token("Risk Flags: identity_conflict", 4),
+                ),
+                1: (
+                    token("FORM B-13: Biometric Scan Slip", 1),
+                    token("Case ID: MIB-000001", 2),
+                    token("Applicant Name: Miraquell Qorul", 3),
+                    token("Risk Flags: active_warrant", 4),
+                ),
+                2: (
+                    token("FORM B-13: Biometric Scan Slip", 1),
+                    token("Case ID: MIB-000001", 2),
+                    token("Applicant Name: Tekdane Zavoss", 3),
+                    token("Risk Flags: planetary_embargo", 4),
+                ),
+            }
+        )
+        rendered = RenderedCase(
+            source_path=Path("MIB-000001.pdf"),
+            source_sha256="0" * 64,
+            case_id="MIB-000001",
+            pages=(make_page(0), make_page(1), make_page(2)),
+            text_layer=(),
+        )
+        candidates = VisibleEvidenceExtractor(
+            ocr_engine=primary,
+            cue_detector=NoCueDetector(),
+            consensus_retry=False,
+            fee_receipt_retry=False,
+            sparse_intake_retry=False,
+            orientation_retry=False,
+            trusted_scope_repair=False,
+            risk_flag_retry=False,
+        ).extract(rendered)
+
+        self.assertFalse(
+            any(
+                candidate.field_name == "risk_flags"
+                and candidate.value is not None
+                and "active_warrant|identity_conflict" in candidate.value
+                for candidate in candidates
+            )
+        )
+        self.assertTrue(
+            all(
+                candidate.applicant_hint == "Tekdane Zavoss"
+                for candidate in candidates
+                if candidate.field_name == "risk_flags"
+                and candidate.value is not None
+                and "planetary_embargo" in candidate.value
+            )
+        )
+
+        from mib_pipeline import CaseLinker, EvidencePrecedenceResolver
+
+        resolved = EvidencePrecedenceResolver().resolve(
+            CaseLinker().link("MIB-000001", candidates)
+        )
+        self.assertEqual(resolved.active_applicant, "Miraquell Qorul")
+        self.assertEqual(resolved.value("risk_flags"), "identity_conflict")
 
 class ContentFilterTests(unittest.TestCase):
     def test_known_injection_and_barcode_instructions_are_rejected(self):

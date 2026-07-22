@@ -103,7 +103,7 @@ class CanonicalWriterTests(unittest.TestCase):
 
 
 class BatchRunnerTests(unittest.TestCase):
-    def test_runner_attempts_every_pdf_and_isolates_case_failures(self):
+    def test_runner_answers_case_failures_with_conservative_fallback(self):
         class SelectiveProcessor:
             def process_case(self, pdf_path):
                 if pdf_path.name == "MIB-000002.pdf":
@@ -123,13 +123,17 @@ class BatchRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(report.attempted, 3)
-            self.assertEqual(report.answered, 2)
-            self.assertEqual(report.omitted, 1)
+            self.assertEqual(report.answered, 3)
+            self.assertEqual(report.omitted, 0)
+            self.assertEqual(len(report.failures), 1)
             self.assertEqual(report.failures[0].source_name, "MIB-000002.pdf")
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
             self.assertEqual(
-                [json.loads(line)["case_id"] for line in output.read_text().splitlines()],
-                ["MIB-000001", "MIB-000003"],
+                [row["case_id"] for row in rows],
+                ["MIB-000001", "MIB-000002", "MIB-000003"],
             )
+            self.assertEqual(rows[1]["adjudication"], "NEEDS_REVIEW")
+            self.assertEqual(rows[1]["confidence"], 0.0)
 
     def test_fallback_processor_answers_large_batch_without_interaction(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

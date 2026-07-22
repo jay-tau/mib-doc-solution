@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .models import PredictionRow
-from .pipeline import CaseProcessor
+from .models import CASE_ID_PATTERN, PredictionRow
+from .pipeline import CaseProcessor, SafeFallbackProcessor
 from .writer import CanonicalJsonlWriter
 
 
@@ -67,10 +67,7 @@ class BatchRunner:
         try:
             computed = self._processor.process_case(pdf_path)
             if computed is None:
-                return CaseResult(
-                    row=None,
-                    failure=CaseFailure(pdf_path.name, "processor omitted case"),
-                )
+                raise RuntimeError("processor omitted case")
             row = (
                 computed
                 if isinstance(computed, PredictionRow)
@@ -82,10 +79,17 @@ class BatchRunner:
             return CaseResult(row=row, failure=None)
         except Exception as exc:
             reason = str(exc).strip() or exc.__class__.__name__
-            return CaseResult(
-                row=None,
-                failure=CaseFailure(pdf_path.name, reason),
+            failure = CaseFailure(pdf_path.name, reason)
+            if not CASE_ID_PATTERN.fullmatch(pdf_path.stem):
+                return CaseResult(
+                    row=None,
+                    failure=failure,
+                )
+            row = PredictionRow.from_mapping(
+                SafeFallbackProcessor().process_case(pdf_path),
+                fallback_case_id=pdf_path.stem,
             )
+            return CaseResult(row=row, failure=failure)
 
     def _process_all(self, pdf_paths: Iterable[Path]) -> tuple[CaseResult, ...]:
         paths = tuple(pdf_paths)
@@ -108,6 +112,6 @@ class BatchRunner:
         return BatchRunReport(
             attempted=len(pdf_paths),
             answered=len(rows),
-            omitted=len(failures),
+            omitted=sum(result.row is None for result in results),
             failures=failures,
         )

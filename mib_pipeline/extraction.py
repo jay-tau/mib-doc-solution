@@ -1211,20 +1211,22 @@ class VisibleEvidenceExtractor:
             "work_permit_requested",
         }:
             candidate = value.casefold().replace("_", " ")
+            if re.search(r"\b(?:invalid|denied|no|not|absent|false|none)\b", candidate):
+                return "no" if field_name == "work_permit_requested" else "invalid"
             if re.search(r"\b(?:valid|approved|granted|yes|present|true)\b", candidate):
                 return "yes" if field_name == "work_permit_requested" else "valid"
-            if re.search(r"\b(?:invalid|denied|no|absent|false|none)\b", candidate):
-                return "no" if field_name == "work_permit_requested" else "invalid"
             return None
         if field_name == "biohazard_check":
             candidate = value.casefold().replace("_", " ")
-            if re.search(r"\b(?:clean|clear|green|negative)\b", candidate):
-                return "clean"
             if re.search(r"\b(?:red|positive|biohazard red)\b", candidate):
                 return "red"
+            if re.search(r"\b(?:clean|clear|green|negative)\b", candidate):
+                return "clean"
             return None
         if field_name == "fee_status":
             fee_key = _ocr_key(value)
+            if fee_key in {"pal", "pag", "pac", "umpaid"}:
+                return "unpaid" if fee_key == "umpaid" else "paid"
             if re.fullmatch(r"p[ao][i1l][dcl]", fee_key):
                 return "paid"
             return _canonical_vocabulary_value(value, FEE_VALUES, cutoff=0.66)
@@ -1320,8 +1322,8 @@ class VisibleEvidenceExtractor:
         """Classify only the leading visible heading region of a page."""
 
         for line in tuple(lines)[:4]:
-            evidence_type = cls._evidence_type(line.text, EvidenceType.INTAKE_FORM)
-            if evidence_type is not EvidenceType.INTAKE_FORM:
+            evidence_type = cls._evidence_type(line.text, EvidenceType.TEXT_LAYER)
+            if evidence_type is not EvidenceType.TEXT_LAYER:
                 return evidence_type
         return EvidenceType.INTAKE_FORM
 
@@ -3575,6 +3577,7 @@ class VisibleEvidenceExtractor:
                 tuple[str, ...],
                 EvidenceType,
                 str | None,
+                str | None,
             ]
         ] = []
         for page in rendered_case.pages:
@@ -3584,11 +3587,7 @@ class VisibleEvidenceExtractor:
             tokens = self._ocr.read_page(page)
             lines = _visual_reading_order(group_ocr_lines(tokens))
             routing_lines[page.index] = lines
-            evidence_type = EvidenceType.INTAKE_FORM
-            for heading_line in lines:
-                evidence_type = self._evidence_type(
-                    heading_line.text, evidence_type
-                )
+            evidence_type = self._visible_page_heading_type(lines)
             visible_case_ids = {
                 value
                 for line in lines
@@ -3647,6 +3646,7 @@ class VisibleEvidenceExtractor:
                             cues,
                             evidence_type,
                             current_case_id,
+                            current_applicant,
                         )
                     )
                 matched = self._match_field(line.text)
@@ -3874,6 +3874,7 @@ class VisibleEvidenceExtractor:
                             ),
                             heading_type,
                             current_case_id,
+                            current_applicant,
                         )
                     )
 
@@ -3990,89 +3991,97 @@ class VisibleEvidenceExtractor:
             # must remain an ordinary extraction gap rather than crashing the
             # whole PDF while selecting a representative observation below.
             if scoped:
-                observed_values = {
-                    flag
-                    for flags, _line, _cues, _type, _case in scoped
-                    for flag in flags
+                precedence = {
+                    EvidenceType.ADJUDICATOR_STAMP: 1,
+                    EvidenceType.SIGNED_MANUAL_NOTE: 1,
+                    EvidenceType.INTAKE_FORM: 2,
+                    EvidenceType.BIOMETRIC_SLIP: 3,
+                    EvidenceType.SPONSOR_ATTESTATION: 4,
+                    EvidenceType.REGISTRY_EXTRACT: 5,
+                    EvidenceType.TEXT_LAYER: 6,
                 }
-                _flags, line, cues, candidate_type, candidate_case_id = min(
-                    scoped,
-                    key=lambda item: (
-                        {
-                            EvidenceType.ADJUDICATOR_STAMP: 1,
-                            EvidenceType.SIGNED_MANUAL_NOTE: 1,
-                            EvidenceType.INTAKE_FORM: 2,
-                            EvidenceType.BIOMETRIC_SLIP: 3,
-                            EvidenceType.SPONSOR_ATTESTATION: 4,
-                            EvidenceType.REGISTRY_EXTRACT: 5,
-                            EvidenceType.TEXT_LAYER: 6,
-                        }[item[3]],
-                        item[1].page_index,
-                    ),
-                )
-                # A labeled line can yield a conservative direct value while
-                # the full, still-visible line yields a strict superset (for
-                # example one clean flag plus one mildly damaged flag).  Drop
-                # only that redundant same-line subset.  An explicit `none`
-                # is deliberately not a known-flag set, so it remains as a
-                # same-rank conflict instead of being silently overridden.
-                redundant_subset_ids: set[int] = set()
-                for candidate in candidates:
-                    if (
-                        candidate.field_name != "risk_flags"
-                        or not candidate.legible
-                        or candidate.value is None
-                        or candidate.superseded
-                        or "strikethrough" in candidate.visual_cues
-                        or "correction" in candidate.visual_cues
-                        or candidate.evidence_type is not candidate_type
-                        or candidate.page_index != line.page_index
-                        or candidate.case_id_hint != candidate_case_id
-                    ):
-                        continue
-                    candidate_flags = set(candidate.value.split("|"))
-                    if (
-                        candidate_flags
-                        and candidate_flags < observed_values
-                        and candidate_flags <= KNOWN_RISK_FLAGS
-                    ):
-                        redundant_subset_ids.add(id(candidate))
-                if redundant_subset_ids:
-                    candidates[:] = [
-                        candidate
-                        for candidate in candidates
-                        if id(candidate) not in redundant_subset_ids
+                by_applicant: dict[str | None, list[tuple[object, ...]]] = {}
+                for observation in scoped:
+                    by_applicant.setdefault(observation[5], []).append(observation)
+                for applicant_hint, observations in by_applicant.items():
+                    best_rank = min(precedence[item[3]] for item in observations)
+                    ranked = [
+                        item
+                        for item in observations
+                        if precedence[item[3]] == best_rank
                     ]
-                aggregate_cues = set(cues)
-                if any(
-                    "fuzzy_risk_phrase" in observation_cues
-                    for (
-                        _observation_flags,
-                        _line,
-                        observation_cues,
-                        _type,
-                        _case,
-                    ) in scoped
-                ):
-                    aggregate_cues.add("fuzzy_risk_phrase")
-                candidates.append(
-                    CandidateEvidence(
-                        field_name="risk_flags",
-                        value="|".join(sorted(observed_values)),
-                        evidence_type=candidate_type,
-                        page_index=line.page_index,
-                        box=line.box,
-                        legible=True,
-                        superseded="strikethrough" in cues,
-                        ocr_confidence=line.confidence,
-                        visual_cues=tuple(sorted(aggregate_cues)),
-                        case_id_hint=candidate_case_id,
-                        # Risk markers apply to the active case as a whole. Do not
-                        # let a lower-precedence applicant mention on a later page
-                        # scope a visible case-level risk marker away.
-                        applicant_hint=None,
+                    observed_values = {
+                        flag
+                        for flags, _line, _cues, _type, _case, _applicant in ranked
+                        for flag in flags
+                    }
+                    (
+                        _flags,
+                        line,
+                        cues,
+                        candidate_type,
+                        candidate_case_id,
+                        _candidate_applicant,
+                    ) = min(ranked, key=lambda item: item[1].page_index)
+                    # A labeled line can yield a conservative direct value while
+                    # the full, still-visible line yields a strict superset. Drop
+                    # only that redundant same-line, same-applicant subset.
+                    redundant_subset_ids: set[int] = set()
+                    for candidate in candidates:
+                        if (
+                            candidate.field_name != "risk_flags"
+                            or not candidate.legible
+                            or candidate.value is None
+                            or candidate.superseded
+                            or "strikethrough" in candidate.visual_cues
+                            or "correction" in candidate.visual_cues
+                            or candidate.evidence_type is not candidate_type
+                            or candidate.page_index != line.page_index
+                            or candidate.case_id_hint != candidate_case_id
+                            or candidate.applicant_hint != applicant_hint
+                        ):
+                            continue
+                        candidate_flags = set(candidate.value.split("|"))
+                        if (
+                            candidate_flags
+                            and candidate_flags < observed_values
+                            and candidate_flags <= KNOWN_RISK_FLAGS
+                        ):
+                            redundant_subset_ids.add(id(candidate))
+                    if redundant_subset_ids:
+                        candidates[:] = [
+                            candidate
+                            for candidate in candidates
+                            if id(candidate) not in redundant_subset_ids
+                        ]
+                    aggregate_cues = set(cues)
+                    if any(
+                        "fuzzy_risk_phrase" in observation_cues
+                        for (
+                            _observation_flags,
+                            _line,
+                            observation_cues,
+                            _type,
+                            _case,
+                            _applicant,
+                        ) in ranked
+                    ):
+                        aggregate_cues.add("fuzzy_risk_phrase")
+                    candidates.append(
+                        CandidateEvidence(
+                            field_name="risk_flags",
+                            value="|".join(sorted(observed_values)),
+                            evidence_type=candidate_type,
+                            page_index=line.page_index,
+                            box=line.box,
+                            legible=True,
+                            superseded="strikethrough" in cues,
+                            ocr_confidence=line.confidence,
+                            visual_cues=tuple(sorted(aggregate_cues)),
+                            case_id_hint=candidate_case_id,
+                            applicant_hint=applicant_hint,
+                        )
                     )
-                )
         baseline = tuple(candidates)
         if self._trusted_scope_repair:
             candidates.extend(
