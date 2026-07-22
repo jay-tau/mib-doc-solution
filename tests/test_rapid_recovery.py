@@ -84,6 +84,7 @@ def resolved_case(
     *,
     values=None,
     unknown=(),
+    contested=(),
     considered=None,
     active=APPLICANT,
     unresolved_linkage=False,
@@ -91,11 +92,19 @@ def resolved_case(
 ):
     values = {**BASE_VALUES, **(values or {})}
     considered = considered or {}
+    unknown = set(unknown)
+    contested = set(contested)
     fields = {
         name: field(
             name,
-            None if name in unknown else value,
-            state=FieldState.UNKNOWN if name in unknown else FieldState.RESOLVED,
+            None if name in unknown or name in contested else value,
+            state=(
+                FieldState.UNKNOWN
+                if name in unknown
+                else FieldState.CONTESTED
+                if name in contested
+                else FieldState.RESOLVED
+            ),
             considered=considered.get(name, ()),
         )
         for name, value in values.items()
@@ -747,6 +756,48 @@ class RapidOutputRecoveryTests(unittest.TestCase):
 
                 self.assertEqual(result, primary_row)
 
+    def test_source_priority_repair_cannot_bypass_a_hard_denial(self):
+        intake_visa = evidence(
+            "visa_class",
+            "XW-1",
+            evidence_type=EvidenceType.INTAKE_FORM,
+            confidence=0.82,
+            applicant=None,
+        )
+        sponsor_visa = evidence(
+            "visa_class",
+            "TRANSIT-7",
+            evidence_type=EvidenceType.SPONSOR_ATTESTATION,
+            confidence=0.95,
+            cues=("structured_sponsor_narrative",),
+            page=1,
+        )
+        primary = resolved_case(
+            values={"visa_class": "XW-1"},
+            considered={"visa_class": (intake_visa, sponsor_visa)},
+        )
+        primary_row = row(
+            visa_class="XW-1",
+            adjudication="APPROVED",
+            confidence=0.98,
+        )
+        recovery, *_rest = processor(
+            primary,
+            resolved_case(),
+            primary_outcome=outcome(
+                primary_row,
+                review_reasons=(),
+                approval_facts=("review_approval",),
+            ),
+            primary_candidates=(intake_visa, sponsor_visa),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.visa_class, "TRANSIT-7")
+        self.assertEqual(result.adjudication, "DENIED")
+        self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
+
     def test_resolved_literal_unknown_does_not_route_rapid(self):
         primary = resolved_case(values={"fee_status": "unknown"})
         rapid = resolved_case(values={"fee_status": "paid"})
@@ -802,9 +853,13 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(adjudicator.calls, 1)
         self.assertEqual(factory.calls, 1)
 
-    def test_rapid_literal_unknown_preserves_primary_fee_prior(self):
+    def test_rapid_literal_unknown_replaces_primary_fee_prior(self):
+        recovered_fee = evidence("fee_status", "unknown")
         primary = resolved_case(unknown={"fee_status"})
-        rapid = resolved_case(values={"fee_status": "unknown"})
+        rapid = resolved_case(
+            values={"fee_status": "unknown"},
+            considered={"fee_status": (recovered_fee,)},
+        )
         primary_row = row(
             fee_status="paid",
             adjudication="NEEDS_REVIEW",
@@ -814,13 +869,39 @@ class RapidOutputRecoveryTests(unittest.TestCase):
             primary,
             rapid,
             primary_outcome=outcome(primary_row),
+            rapid_candidates=(recovered_fee,),
         )
 
         result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
-        self.assertEqual(result.fee_status, "paid")
+        self.assertEqual(result.fee_status, "unknown")
         self.assertEqual(result.adjudication, "NEEDS_REVIEW")
         self.assertEqual(result.confidence, 0.37)
+
+    def test_rapid_literal_unknown_reverses_a_heuristic_approval(self):
+        recovered_fee = evidence("fee_status", "unknown")
+        primary = resolved_case(unknown={"fee_status"})
+        rapid = resolved_case(
+            values={"fee_status": "unknown"},
+            considered={"fee_status": (recovered_fee,)},
+        )
+        approved = row(adjudication="APPROVED", confidence=0.98)
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_outcome=outcome(
+                approved,
+                review_reasons=(),
+                approval_facts=("review_approval",),
+            ),
+            rapid_candidates=(recovered_fee,),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.fee_status, "unknown")
+        self.assertEqual(result.adjudication, "NEEDS_REVIEW")
+        self.assertEqual(result.confidence, 0.98)
 
     def test_recovers_rapid_active_applicant_when_primary_is_absent(self):
         primary = resolved_case(unknown={"applicant_name"}, active=None)
@@ -969,7 +1050,7 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(result.adjudication, "DENIED")
         self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
 
-    def test_semantic_barred_sponsor_requires_two_rapid_winners(self):
+    def test_semantic_barred_sponsor_combines_visible_primary_and_rapid_facts(self):
         recovered_sponsor = evidence("sponsor_id", "SPN-7331")
         recovered_visa = evidence("visa_class", "MED-3")
         primary = resolved_case(unknown={"sponsor_id", "visa_class"})
@@ -1006,15 +1087,16 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         recovery, *_rest = processor(
             primary,
             rapid,
+            primary_outcome=outcome(row(visa_class="XW-1")),
             primary_candidates=(primary_visa,),
             rapid_candidates=(recovered_sponsor,),
         )
 
-        one_rapid_winner = recovery.process_case(Path(CASE_ID + ".pdf"))
+        mixed_source = recovery.process_case(Path(CASE_ID + ".pdf"))
 
-        self.assertEqual(one_rapid_winner.sponsor_id, "SPN-7331")
-        self.assertEqual(one_rapid_winner.adjudication, "NEEDS_REVIEW")
-        self.assertEqual(one_rapid_winner.confidence, 0.37)
+        self.assertEqual(mixed_source.sponsor_id, "SPN-7331")
+        self.assertEqual(mixed_source.adjudication, "DENIED")
+        self.assertEqual(mixed_source.confidence, SEMANTIC_DENIAL_CONFIDENCE)
 
     def test_semantic_head_rejects_priors_bad_cues_and_wrong_scope(self):
         anchor = evidence("risk_flags", None, applicant=None)
@@ -1128,7 +1210,7 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(serialized_prior.home_world, "Wolf-1061c")
         self.assertEqual(serialized_prior.adjudication, "NEEDS_REVIEW")
 
-    def test_authority_vetoes_semantic_denial_and_transit_never_triggers_it(self):
+    def test_authority_vetoes_semantic_denial_and_visible_transit_denies(self):
         anchor = evidence("risk_flags", None, applicant=None)
         recovered_risk = evidence(
             "risk_flags",
@@ -1201,8 +1283,189 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         transit = recovery.process_case(Path(CASE_ID + ".pdf"))
 
         self.assertEqual(transit.visa_class, "TRANSIT-7")
-        self.assertEqual(transit.adjudication, "NEEDS_REVIEW")
-        self.assertEqual(transit.confidence, 0.37)
+        self.assertEqual(transit.adjudication, "DENIED")
+        self.assertEqual(transit.confidence, SEMANTIC_DENIAL_CONFIDENCE)
+
+    def test_semantic_head_denies_visible_unpaid_and_stale_recoveries(self):
+        cases = (
+            ("fee_status", "unpaid", {"fee_status"}),
+            ("arrival_date", "2025-01-01", {"arrival_date"}),
+        )
+        for field_name, value, unknown in cases:
+            with self.subTest(field_name=field_name):
+                recovered = evidence(field_name, value)
+                primary = resolved_case(
+                    values={"visa_class": "XW-2"},
+                    unknown=unknown,
+                    considered={"visa_class": (evidence("visa_class", "XW-2"),)},
+                )
+                rapid = resolved_case(
+                    values={field_name: value},
+                    considered={field_name: (recovered,)},
+                )
+                recovery, *_rest = processor(
+                    primary,
+                    rapid,
+                    primary_candidates=primary.fields["visa_class"].considered,
+                    rapid_candidates=(recovered,),
+                )
+
+                result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+                self.assertEqual(result.adjudication, "DENIED")
+                self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
+
+    def test_semantic_denial_overrides_a_non_authoritative_approval(self):
+        recovered_fee = evidence("fee_status", "unpaid")
+        primary = resolved_case(unknown={"fee_status"})
+        rapid = resolved_case(
+            values={"fee_status": "unpaid"},
+            considered={"fee_status": (recovered_fee,)},
+        )
+        approved = row(adjudication="APPROVED", confidence=0.98)
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_outcome=outcome(
+                approved,
+                review_reasons=(),
+                approval_facts=("review_approval",),
+            ),
+            rapid_candidates=(recovered_fee,),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.fee_status, "unpaid")
+        self.assertEqual(result.adjudication, "DENIED")
+        self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
+
+    def test_semantic_unpaid_respects_visible_rapid_hardship_waiver(self):
+        recovered_fee = evidence("fee_status", "unpaid")
+        recovered_waiver = evidence("hardship_waiver", "valid")
+        rapid = resolved_case(
+            values={"fee_status": "unpaid", "hardship_waiver": "valid"},
+            considered={
+                "fee_status": (recovered_fee,),
+                "hardship_waiver": (recovered_waiver,),
+            },
+        )
+        hidden_waiver = evidence(
+            "hardship_waiver",
+            "valid",
+            evidence_type=EvidenceType.TEXT_LAYER,
+            source="text_layer",
+        )
+        primaries = (
+            resolved_case(
+                values={"hardship_waiver": "valid"},
+                unknown={"fee_status", "hardship_waiver"},
+            ),
+            resolved_case(
+                values={"hardship_waiver": "valid"},
+                unknown={"fee_status"},
+                considered={"hardship_waiver": (hidden_waiver,)},
+            ),
+        )
+        for primary in primaries:
+            with self.subTest(primary_state=primary.fields["hardship_waiver"].state):
+                recovery, *_rest = processor(
+                    primary,
+                    rapid,
+                    rapid_candidates=(recovered_fee, recovered_waiver),
+                )
+
+                result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+                self.assertEqual(result.fee_status, "unpaid")
+                self.assertEqual(result.adjudication, "NEEDS_REVIEW")
+                self.assertEqual(result.confidence, 0.37)
+
+    def test_semantic_head_rejects_rapid_facts_for_another_applicant(self):
+        other_applicant = "Miraul Miraquell"
+        recovered_fee = evidence(
+            "fee_status",
+            "unpaid",
+            applicant=other_applicant,
+        )
+        primary = resolved_case(unknown={"fee_status"})
+        rapid = resolved_case(
+            values={"fee_status": "unpaid"},
+            considered={"fee_status": (recovered_fee,)},
+            active=other_applicant,
+        )
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            rapid_active=other_applicant,
+            rapid_candidates=(recovered_fee,),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.fee_status, "paid")
+        self.assertEqual(result.adjudication, "NEEDS_REVIEW")
+        self.assertEqual(result.confidence, 0.37)
+
+    def test_semantic_staleness_uses_visible_packet_receipt_date(self):
+        primary_visa = evidence("visa_class", "XW-2")
+        receipt = evidence("packet_receipt_date", "2026-02-01")
+        recovered_arrival = evidence("arrival_date", "2025-09-01")
+        primary = resolved_case(
+            values={"packet_receipt_date": "2026-02-01"},
+            unknown={"arrival_date"},
+            considered={
+                "visa_class": (primary_visa,),
+                "packet_receipt_date": (receipt,),
+            },
+        )
+        rapid = resolved_case(
+            values={"arrival_date": "2025-09-01"},
+            considered={"arrival_date": (recovered_arrival,)},
+        )
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_candidates=(primary_visa, receipt),
+            rapid_candidates=(recovered_arrival,),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.arrival_date, "2025-09-01")
+        self.assertEqual(result.adjudication, "NEEDS_REVIEW")
+        self.assertEqual(result.confidence, 0.37)
+
+    def test_semantic_head_denies_visible_stay_and_med3_policy_facts(self):
+        cases = (
+            ("stay_duration_days", "31", "XW-1"),
+            ("biohazard_check", "red", "MED-3"),
+        )
+        for field_name, value, visa_class in cases:
+            with self.subTest(field_name=field_name):
+                policy_fact = evidence(field_name, value)
+                recovered_visa = evidence("visa_class", visa_class)
+                primary = resolved_case(
+                    values={field_name: value},
+                    unknown={"visa_class"},
+                    considered={field_name: (policy_fact,)},
+                )
+                rapid = resolved_case(
+                    values={"visa_class": visa_class},
+                    considered={"visa_class": (recovered_visa,)},
+                )
+                recovery, *_rest = processor(
+                    primary,
+                    rapid,
+                    primary_candidates=(policy_fact,),
+                    rapid_candidates=(recovered_visa,),
+                )
+
+                result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+                self.assertEqual(result.visa_class, visa_class)
+                self.assertEqual(result.adjudication, "DENIED")
+                self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
 
     def test_semantic_denial_preserves_biometric_applicant_and_fee_recovery(self):
         intake = evidence(
@@ -1251,29 +1514,39 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(result.adjudication, "DENIED")
         self.assertEqual(result.confidence, SEMANTIC_DENIAL_CONFIDENCE)
 
-    def test_exact_unanimous_authoritative_note_can_change_review_only(self):
+    def test_exact_unanimous_authoritative_note_overrides_nonauthoritative_state(self):
         primary = resolved_case(unknown={"fee_status"})
         rapid = resolved_case(unknown={"fee_status"})
-        candidate = evidence(
-            "adjudication",
-            "DENIED",
-            evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
-            confidence=0.90,
+        cases = (
+            ("DENIED", row(adjudication="NEEDS_REVIEW", confidence=0.37)),
+            ("DENIED", row(adjudication="APPROVED", confidence=0.98)),
+            ("APPROVED", row(adjudication="DENIED", confidence=0.61)),
+            ("NEEDS_REVIEW", row(adjudication="APPROVED", confidence=0.98)),
         )
-        primary_row = row(adjudication="NEEDS_REVIEW", confidence=0.37)
-        recovery, *_rest = processor(
-            primary,
-            rapid,
-            primary_outcome=outcome(primary_row),
-            rapid_candidates=(candidate,),
-        )
+        for signed_decision, primary_row in cases:
+            with self.subTest(
+                signed_decision=signed_decision,
+                primary_decision=primary_row.adjudication,
+            ):
+                candidate = evidence(
+                    "adjudication",
+                    signed_decision,
+                    evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
+                    confidence=0.90,
+                )
+                recovery, *_rest = processor(
+                    primary,
+                    rapid,
+                    primary_outcome=outcome(primary_row),
+                    rapid_candidates=(candidate,),
+                )
 
-        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+                result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
-        self.assertEqual(result.adjudication, "DENIED")
-        self.assertEqual(result.confidence, 0.37)
+                self.assertEqual(result.adjudication, signed_decision)
+                self.assertEqual(result.confidence, primary_row.confidence)
 
-    def test_xw1_multisource_recovery_accepts_only_the_two_audited_fee_shapes(self):
+    def test_xw1_multisource_recovery_requires_a_policy_valid_fee(self):
         required_facts = (
             "application_date_current_or_exempt",
             "sponsor_present_and_not_publicly_barred",
@@ -1287,17 +1560,27 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                     "risk_flags_unknown",
                 ),
                 "approval_facts": (*required_facts, "fee_paid"),
+                "approved": True,
             },
             "unsupported_waiver_only": {
                 "fee_status": "waived",
                 "unknown": set(),
                 "review_reasons": ("unsupported_fee_waiver",),
                 "approval_facts": required_facts,
+                "approved": False,
             },
         }
 
         for label, values in variants.items():
             with self.subTest(label=label):
+                clean_risk = evidence(
+                    "risk_flags",
+                    "none",
+                    evidence_type=EvidenceType.BIOMETRIC_SLIP,
+                )
+                risk_anchor = evidence("risk_flags", None, applicant=None)
+                visible_fee = evidence("fee_status", values["fee_status"])
+                risk_is_unknown = "risk_flags" in values["unknown"]
                 primary_row = row(
                     visa_class="XW-1",
                     fee_status=values["fee_status"],
@@ -1309,33 +1592,46 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                         "fee_status": values["fee_status"],
                     },
                     unknown=values["unknown"],
+                    considered={
+                        "risk_flags": (
+                            (risk_anchor,) if risk_is_unknown else (clean_risk,)
+                        ),
+                        "fee_status": (visible_fee,),
+                    },
+                )
+                rapid = resolved_case(
+                    values={"risk_flags": "none"},
+                    considered={"risk_flags": (clean_risk,)},
                 )
                 recovery, _renderer, _linker, _resolver, _adjudicator, factory = (
                     processor(
                         primary,
-                        resolved_case(),
+                        rapid,
                         primary_outcome=outcome(
                             primary_row,
                             review_reasons=values["review_reasons"],
                             approval_facts=values["approval_facts"],
                         ),
-                        primary_candidates=xw1_multisource_candidates(),
+                        primary_candidates=(
+                            xw1_multisource_candidates()
+                            + ((risk_anchor,) if risk_is_unknown else (clean_risk,))
+                            + (visible_fee,)
+                        ),
+                        rapid_candidates=(clean_risk,) if risk_is_unknown else (),
                     )
                 )
 
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
-                expected = primary_row.to_dict()
-                expected.update(
-                    {
-                        "adjudication": "APPROVED",
-                        "confidence": (
-                            XW1_MULTISOURCE_REVIEW_APPROVAL_CONFIDENCE
-                        ),
-                    }
-                )
-                self.assertEqual(result.to_dict(), expected)
-                self.assertEqual(factory.calls, 0)
+                if values["approved"]:
+                    self.assertEqual(result.adjudication, "APPROVED")
+                    self.assertEqual(
+                        result.confidence,
+                        XW1_MULTISOURCE_REVIEW_APPROVAL_CONFIDENCE,
+                    )
+                else:
+                    self.assertEqual(result, primary_row)
+                self.assertEqual(factory.calls, int(risk_is_unknown))
 
     def test_xw1_multisource_recovery_vetoes_incomplete_or_unsafe_policy_state(self):
         candidates = xw1_multisource_candidates()
@@ -1577,6 +1873,12 @@ class RapidOutputRecoveryTests(unittest.TestCase):
             evidence("applicant_name", APPLICANT, page=page)
             for page in range(6)
         )
+        clean_risk = evidence(
+            "risk_flags",
+            "none",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        paid_fee = evidence("fee_status", "paid")
         branches = {
             "six_primary_applicant_candidates": {
                 "prediction": row(arrival_date="2026-04-27"),
@@ -1603,14 +1905,21 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                 primary_row = values["prediction"]
                 recovery, _renderer, _linker, _resolver, _adjudicator, factory = (
                     processor(
-                        resolved_case(),
+                        resolved_case(
+                            considered={
+                                "risk_flags": (clean_risk,),
+                                "fee_status": (paid_fee,),
+                            },
+                        ),
                         resolved_case(),
                         primary_outcome=outcome(
                             primary_row,
                             review_reasons=values["review_reasons"],
                             approval_facts=values["approval_facts"],
                         ),
-                        primary_candidates=values["candidates"],
+                        primary_candidates=(
+                            values["candidates"] + (clean_risk, paid_fee)
+                        ),
                     )
                 )
 
@@ -1691,12 +2000,42 @@ class RapidOutputRecoveryTests(unittest.TestCase):
 
                 self.assertEqual(result, primary_row)
 
-        normalized_risk_row = row(risk_flags="NoNe")
+        missing_risk_row = row(risk_flags="none")
         recovery, *_rest = processor(
+            resolved_case(unknown={"risk_flags"}),
             resolved_case(),
+            primary_outcome=outcome(
+                missing_risk_row,
+                review_reasons=(
+                    "required_output_unknown:risk_flags",
+                    "risk_flags_unknown",
+                ),
+            ),
+            primary_candidates=six_applicant_candidates,
+        )
+
+        self.assertEqual(
+            recovery.process_case(Path(CASE_ID + ".pdf")),
+            missing_risk_row,
+        )
+
+        normalized_risk_row = row(risk_flags="NoNe")
+        clean_risk = evidence(
+            "risk_flags",
+            "none",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        paid_fee = evidence("fee_status", "paid")
+        recovery, *_rest = processor(
+            resolved_case(
+                considered={
+                    "risk_flags": (clean_risk,),
+                    "fee_status": (paid_fee,),
+                },
+            ),
             resolved_case(),
             primary_outcome=outcome(normalized_risk_row),
-            primary_candidates=six_applicant_candidates,
+            primary_candidates=six_applicant_candidates + (clean_risk, paid_fee),
         )
 
         normalized_risk = recovery.process_case(Path(CASE_ID + ".pdf"))
@@ -1712,13 +2051,27 @@ class RapidOutputRecoveryTests(unittest.TestCase):
             evidence("applicant_name", APPLICANT, page=page)
             for page in range(6)
         )
-        primary = resolved_case(unknown={"species_code"})
+        clean_risk = evidence(
+            "risk_flags",
+            "none",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        paid_fee = evidence("fee_status", "paid")
+        primary = resolved_case(
+            unknown={"species_code"},
+            considered={
+                "risk_flags": (clean_risk,),
+                "fee_status": (paid_fee,),
+            },
+        )
         rapid = resolved_case(values={"species_code": "ARCTURIAN"})
         recovery, _renderer, _linker, _resolver, _adjudicator, factory = (
             processor(
                 primary,
                 rapid,
-                primary_candidates=six_applicant_candidates,
+                primary_candidates=(
+                    six_applicant_candidates + (clean_risk, paid_fee)
+                ),
             )
         )
 
@@ -1728,6 +2081,70 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(result.adjudication, "APPROVED")
         self.assertEqual(result.confidence, REVIEW_APPROVAL_CONFIDENCE)
         self.assertEqual(factory.calls, 1)
+
+    def test_review_approval_rejects_contested_risk_and_untrusted_fee(self):
+        six_names = tuple(
+            evidence("applicant_name", APPLICANT, page=page)
+            for page in range(6)
+        )
+        paid_fee = evidence("fee_status", "paid")
+        clean_risk = evidence(
+            "risk_flags",
+            "none",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        active_risk = evidence(
+            "risk_flags",
+            "active_warrant",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        primary = resolved_case(
+            unknown={"species_code"},
+            contested={"risk_flags"},
+            considered={
+                "risk_flags": (clean_risk, active_risk),
+                "fee_status": (paid_fee,),
+            },
+        )
+        rapid = resolved_case(
+            values={"species_code": "ARCTURIAN", "risk_flags": "none"},
+            considered={"risk_flags": (clean_risk,)},
+        )
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_candidates=six_names + (clean_risk, active_risk, paid_fee),
+            rapid_candidates=(clean_risk,),
+        )
+
+        contested = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(contested.adjudication, "NEEDS_REVIEW")
+
+        hidden_unpaid = evidence(
+            "fee_status",
+            "unpaid",
+            evidence_type=EvidenceType.TEXT_LAYER,
+            source="text_layer",
+        )
+        primary = resolved_case(
+            values={"fee_status": "unpaid"},
+            considered={
+                "risk_flags": (clean_risk,),
+                "fee_status": (hidden_unpaid,),
+            },
+        )
+        primary_row = row(fee_status="unpaid")
+        recovery, *_rest = processor(
+            primary,
+            resolved_case(),
+            primary_outcome=outcome(primary_row),
+            primary_candidates=six_names + (clean_risk, hidden_unpaid),
+        )
+
+        untrusted_fee = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(untrusted_fee, primary_row)
 
     def test_review_approval_head_preserves_authority_and_denial_precedence(self):
         six_applicant_candidates = tuple(
@@ -1860,6 +2277,31 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
                 self.assertEqual(result, primary_row)
+
+        approved = row(adjudication="APPROVED", confidence=0.98)
+        conflicting = (
+            evidence(
+                "adjudication",
+                "DENIED",
+                evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
+            ),
+            evidence(
+                "adjudication",
+                "NEEDS_REVIEW",
+                evidence_type=EvidenceType.ADJUDICATOR_STAMP,
+            ),
+        )
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_outcome=outcome(approved),
+            rapid_candidates=conflicting,
+        )
+
+        conflict = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(conflict.adjudication, "NEEDS_REVIEW")
+        self.assertEqual(conflict.confidence, 0.98)
 
     def test_any_rapid_exception_fails_closed_to_primary_row(self):
         primary = resolved_case(unknown={"species_code"})

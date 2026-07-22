@@ -242,7 +242,13 @@ class PacketPageTypeMarkerTests(unittest.TestCase):
 
 class ReviewDiplomaticApprovalRecoveryTests(unittest.TestCase):
     FEE = marker("page_type_present_fee_receipt", "fee_receipt")
+    PAID_FEE = visible_field("fee_status", "paid")
     DIPLOMATIC_VISA = visible_field("visa_class", "DIP-1")
+    CLEAN_RISK = visible_field(
+        "risk_flags",
+        "none",
+        evidence_type=EvidenceType.BIOMETRIC_SLIP,
+    )
 
     def assert_recovered(self, original, recovered):
         self.assertEqual(recovered.row.adjudication, "APPROVED")
@@ -277,17 +283,22 @@ class ReviewDiplomaticApprovalRecoveryTests(unittest.TestCase):
                         "diplomatic_sponsor_exemption",
                     ),
                     prediction=row(visa_class="DIP-1", confidence=0.25),
-                    review_reasons=("fee_status_unknown",),
+                    review_reasons=("required_output_unknown:species_code",),
                 ),
-                resolved_case(self.FEE),
+                resolved_case(self.FEE, self.CLEAN_RISK, self.PAID_FEE),
             ),
             (
                 outcome(
                     approval_facts=("application_date_current_or_exempt",),
                     prediction=row(visa_class="DIP-1", confidence=0.25),
-                    review_reasons=("required_output_unknown:risk_flags",),
+                    review_reasons=("required_output_unknown:species_code",),
                 ),
-                resolved_case(self.FEE, self.DIPLOMATIC_VISA),
+                resolved_case(
+                    self.FEE,
+                    self.DIPLOMATIC_VISA,
+                    self.CLEAN_RISK,
+                    self.PAID_FEE,
+                ),
             ),
         )
         for original, resolved in cases:
@@ -308,6 +319,15 @@ class ReviewDiplomaticApprovalRecoveryTests(unittest.TestCase):
         )
         variants = (
             (diplomatic, resolved_case()),
+            (diplomatic, resolved_case(self.FEE)),
+            (
+                outcome(
+                    approval_facts=("diplomatic_sponsor_exemption",),
+                    prediction=row(visa_class="DIP-1"),
+                    review_reasons=("fee_status_unknown",),
+                ),
+                resolved_case(self.FEE, self.CLEAN_RISK),
+            ),
             (diplomatic, resolved_case(duplicate_fee_pages)),
             (
                 diplomatic,
@@ -395,6 +415,12 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
     )
     OTHER = marker("page_type_present_other", "other")
     CURRENT_APPLICATION = "application_date_current_or_exempt"
+    CLEAN_RISK = visible_field(
+        "risk_flags",
+        "none",
+        evidence_type=EvidenceType.BIOMETRIC_SLIP,
+    )
+    PAID_FEE = visible_field("fee_status", "paid")
 
     def assert_recovered(self, original, recovered, expected_fact):
         self.assertEqual(recovered.row.adjudication, "APPROVED")
@@ -418,7 +444,11 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
         cases = (
             (
                 outcome(prediction=row(visa_class="XW-1", confidence=0.20)),
-                resolved_case(self.SPONSOR),
+                resolved_case(
+                    self.SPONSOR,
+                    self.CLEAN_RISK,
+                    self.PAID_FEE,
+                ),
                 "review_approval_sponsor_attestation_xw1",
             ),
             (
@@ -427,7 +457,7 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
                     approval_facts=(self.CURRENT_APPLICATION,),
                     prediction=row(confidence=0.25),
                 ),
-                resolved_case(),
+                resolved_case(self.CLEAN_RISK, self.PAID_FEE),
                 "review_approval_current_application_visa_unknown",
             ),
             (
@@ -436,7 +466,7 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
                     approval_facts=(self.CURRENT_APPLICATION,),
                     prediction=row(confidence=0.35),
                 ),
-                resolved_case(),
+                resolved_case(self.CLEAN_RISK, self.PAID_FEE),
                 "review_approval_current_application_home_world_unknown",
             ),
         )
@@ -463,7 +493,10 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
             approval_facts=(self.CURRENT_APPLICATION,),
             prediction=row(confidence=0.35),
         )
-        recovered, _baseline = recover(boundary, resolved_case())
+        recovered, _baseline = recover(
+            boundary,
+            resolved_case(self.CLEAN_RISK, self.PAID_FEE),
+        )
         self.assert_recovered(
             boundary,
             recovered,
@@ -474,6 +507,7 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
         valid = outcome(prediction=row(visa_class="XW-1", confidence=0.20))
         variants = (
             (valid, resolved_case()),
+            (valid, resolved_case(self.SPONSOR)),
             (
                 outcome(prediction=row(visa_class="XW-2", confidence=0.20)),
                 resolved_case(self.SPONSOR),

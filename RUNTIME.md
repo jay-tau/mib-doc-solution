@@ -81,9 +81,9 @@ docker run --rm \
 ```
 
 The entrypoint rejects missing or extra arguments. It reads only the supplied
-input directory and writes only the exact supplied output path. The image runs
-as an unprivileged user, sets `/tmp` as its temporary and home directory, and
-does not require a writable container root.
+input directory and writes only the exact supplied output path. The image does
+not require a writable container root; it retains Docker's default user so it
+can write organizer-created bind mounts without host UID assumptions.
 
 ## Offline and resource guarantees
 

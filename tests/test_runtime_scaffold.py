@@ -104,9 +104,9 @@ class RuntimeScaffoldTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text()
 
         self.assertIn('if [ "$#" -ne 2 ]', run_script)
+        self.assertIn('python3 -B /app/solution.py', run_script)
         self.assertIn('ENTRYPOINT ["/app/run.sh"]', dockerfile)
         self.assertIn("FROM python:3.12.11-slim-bookworm", dockerfile)
-        self.assertIn("USER mib:mib", dockerfile)
         self.assertIn("MIB_MAX_WORKERS=4", dockerfile)
 
 

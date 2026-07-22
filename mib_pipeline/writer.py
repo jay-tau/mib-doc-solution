@@ -62,6 +62,7 @@ class CanonicalJsonlWriter:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(str(temporary_path), str(output_path))
+            os.chmod(output_path, 0o644)
         except BaseException:
             if descriptor >= 0:
                 os.close(descriptor)

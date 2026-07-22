@@ -6,4 +6,4 @@ if [ "$#" -ne 2 ]; then
   exit 64
 fi
 
-exec python3 -I -B /app/solution.py "$1" "$2"
+exec python3 -B /app/solution.py "$1" "$2"

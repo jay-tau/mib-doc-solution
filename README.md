@@ -60,6 +60,11 @@ constrained Docker invocation, offline model details, and recovery safety
 boundary. Third-party OCR model provenance and licenses are retained under
 [`third_party_licenses/`](third_party_licenses/README.md).
 
+This solution is derived from Chris Strobl's public
+[`strobl/mib-doc-solution`](https://github.com/strobl/mib-doc-solution) at
+commit `d6752ecd88220e8fcd07f6d6825d2b8d642c9edc`. The changes and retained
+licenses are documented in [`ATTRIBUTION.md`](ATTRIBUTION.md).
+
 ## Output Format
 
 One JSON object per line, one line per answered case:

@@ -83,13 +83,33 @@ _INCOMPLETE_REVIEW_VALUES = frozenset({"", "unknown", "null"})
 _REVIEW_APPROVAL_SNAPSHOT_DATE = date(2026, 7, 7)
 SEMANTIC_POLICY_RULES = PolicyRuleSet()
 SEMANTIC_EVIDENCE_FIELDS = frozenset(
-    {"risk_flags", "home_world", "visa_class", "sponsor_id"}
+    {
+        "risk_flags",
+        "home_world",
+        "visa_class",
+        "sponsor_id",
+        "arrival_date",
+        "fee_status",
+    }
+)
+SEMANTIC_POLICY_EVIDENCE_FIELDS = frozenset(
+    {
+        "stay_duration_days",
+        "packet_receipt_date",
+        "biohazard_check",
+        "hardship_waiver",
+    }
 )
 SEMANTIC_DENIAL_RULE_IDS = (
     "semantic_disqualifying_risk",
     "semantic_absolute_embargo",
     "semantic_wolf_non_diplomatic",
-    "semantic_rapid_barred_sponsor",
+    "semantic_barred_sponsor",
+    "semantic_unpaid_fee",
+    "semantic_transit_visa",
+    "semantic_stale_non_diplomatic",
+    "semantic_stay_limit_exceeded",
+    "semantic_med3_biohazard_red",
 )
 
 
@@ -270,8 +290,9 @@ class RapidOutputRecoveryProcessor:
             )
         )
 
-    @staticmethod
+    @classmethod
     def _authoritative_rapid_decision(
+        cls,
         *,
         case_id: str,
         primary_resolved: ResolvedCase,
@@ -282,7 +303,11 @@ class RapidOutputRecoveryProcessor:
 
         active_applicant = primary_resolved.active_applicant
         if (
-            primary_outcome.row.adjudication != "NEEDS_REVIEW"
+            primary_outcome.row.adjudication
+            != primary_outcome.trace.decision
+            or primary_outcome.row.adjudication
+            not in {"APPROVED", "DENIED", "NEEDS_REVIEW"}
+            or cls._primary_authoritative_decision(primary_outcome)
             or active_applicant is None
             or "authoritative_visible_decision"
             in primary_outcome.trace.review_reasons
@@ -292,7 +317,7 @@ class RapidOutputRecoveryProcessor:
             candidate
             for candidate in rapid_candidates
             if candidate.field_name == "adjudication"
-            and candidate.value in {"APPROVED", "DENIED"}
+            and candidate.value in {"APPROVED", "DENIED", "NEEDS_REVIEW"}
             and candidate.evidence_type in AUTHORITATIVE_RAPID_TYPES
             and candidate.legible
             and not candidate.superseded
@@ -303,7 +328,9 @@ class RapidOutputRecoveryProcessor:
             and not (RAPID_BAD_CUES & set(candidate.visual_cues))
         )
         decisions = {candidate.value for candidate in eligible}
-        return next(iter(decisions)) if len(decisions) == 1 else None
+        if not decisions:
+            return None
+        return next(iter(decisions)) if len(decisions) == 1 else "NEEDS_REVIEW"
 
     @staticmethod
     def _primary_authoritative_decision(outcome: AdjudicationOutcome) -> bool:
@@ -332,11 +359,12 @@ class RapidOutputRecoveryProcessor:
         lower-precedence policy fact to replace a visible signed decision.
         """
 
-        applicant_aliases = {
-            None,
-            primary_resolved.active_applicant,
-            rapid_resolved.active_applicant,
-        }
+        active_applicant = (
+            primary_resolved.active_applicant
+            if primary_resolved.active_applicant is not None
+            else rapid_resolved.active_applicant
+        )
+        applicant_aliases = {None, active_applicant}
         return any(
             isinstance(candidate, CandidateEvidence)
             and candidate.field_name == "adjudication"
@@ -422,17 +450,20 @@ class RapidOutputRecoveryProcessor:
         primary_outcome: AdjudicationOutcome,
         unknown_fields: frozenset[str],
         recover_risk: bool,
+        source_repaired_fields: frozenset[str] = frozenset(),
     ) -> tuple[str, ...]:
         """Match the frozen, identity-free post-Rapid denial head.
 
-        Primary and Rapid values stay separate so the barred-sponsor rule can
-        require two independently recovered Rapid winners. Values used only
-        for JSON schema completion never enter this method as evidence.
+        Values used only for JSON schema completion never enter this method as
+        evidence. Rapid policy-only facts are accepted only when the primary
+        resolver lacks a trusted, uncontested visible winner.
         """
 
         if (
-            primary_outcome.row.adjudication != "NEEDS_REVIEW"
-            or primary_outcome.trace.decision != "NEEDS_REVIEW"
+            primary_outcome.row.adjudication
+            != primary_outcome.trace.decision
+            or primary_outcome.row.adjudication
+            not in {"APPROVED", "NEEDS_REVIEW"}
             or cls._primary_authoritative_decision(primary_outcome)
             or cls._has_authoritative_rapid_decision(
                 case_id=case_id,
@@ -445,6 +476,11 @@ class RapidOutputRecoveryProcessor:
 
         primary_unsafe_pages = cls._unsafe_pages(primary_candidates)
         rapid_unsafe_pages = cls._unsafe_pages(rapid_candidates)
+        rapid_scope_matches = (
+            primary_resolved.active_applicant is None
+            or rapid_resolved.active_applicant
+            == primary_resolved.active_applicant
+        )
         primary_values = {
             field_name: value
             for field_name in SEMANTIC_EVIDENCE_FIELDS
@@ -459,9 +495,17 @@ class RapidOutputRecoveryProcessor:
             is not None
             and payload.get(field_name) == value
         }
+        for field_name in source_repaired_fields & SEMANTIC_EVIDENCE_FIELDS:
+            value = payload.get(field_name)
+            if isinstance(value, str):
+                primary_values[field_name] = value
 
         rapid_values: dict[str, str] = {}
-        for field_name in SEMANTIC_EVIDENCE_FIELDS & unknown_fields:
+        for field_name in (
+            SEMANTIC_EVIDENCE_FIELDS & unknown_fields
+            if rapid_scope_matches
+            else ()
+        ):
             value = cls._visible_resolved_value(
                 case_id=case_id,
                 resolved=rapid_resolved,
@@ -470,7 +514,7 @@ class RapidOutputRecoveryProcessor:
             )
             if value is not None and payload.get(field_name) == value:
                 rapid_values[field_name] = value
-        if recover_risk:
+        if recover_risk and rapid_scope_matches:
             rapid_risk = cls._visible_resolved_value(
                 case_id=case_id,
                 resolved=rapid_resolved,
@@ -482,7 +526,33 @@ class RapidOutputRecoveryProcessor:
             ) == rapid_risk:
                 rapid_values[RAPID_RISK_FIELD] = rapid_risk
 
-        values = {**primary_values, **rapid_values}
+        policy_values: dict[str, str] = {}
+        for field_name in SEMANTIC_POLICY_EVIDENCE_FIELDS:
+            value = cls._visible_resolved_value(
+                case_id=case_id,
+                resolved=primary_resolved,
+                field_name=field_name,
+                unsafe_pages=primary_unsafe_pages,
+            )
+            primary_field = primary_resolved.fields.get(field_name)
+            if (
+                value is None
+                and rapid_scope_matches
+                and (
+                    primary_field is None
+                    or primary_field.state is not FieldState.CONTESTED
+                )
+            ):
+                value = cls._visible_resolved_value(
+                    case_id=case_id,
+                    resolved=rapid_resolved,
+                    field_name=field_name,
+                    unsafe_pages=rapid_unsafe_pages,
+                )
+            if value is not None:
+                policy_values[field_name] = value
+
+        values = {**primary_values, **rapid_values, **policy_values}
         matches: list[str] = []
         if cls._parse_risk_flags(values.get("risk_flags")) & (
             SEMANTIC_POLICY_RULES.disqualifying_flags
@@ -497,10 +567,46 @@ class RapidOutputRecoveryProcessor:
         ):
             matches.append(SEMANTIC_DENIAL_RULE_IDS[2])
         if (
-            rapid_values.get("sponsor_id") in SEMANTIC_POLICY_RULES.barred_sponsors
-            and rapid_values.get("visa_class") not in {None, "DIP-1"}
+            values.get("sponsor_id") in SEMANTIC_POLICY_RULES.barred_sponsors
+            and values.get("visa_class") not in {None, "DIP-1"}
         ):
             matches.append(SEMANTIC_DENIAL_RULE_IDS[3])
+        if (
+            values.get("fee_status") == "unpaid"
+            and values.get("hardship_waiver") != "valid"
+        ):
+            matches.append(SEMANTIC_DENIAL_RULE_IDS[4])
+        if values.get("visa_class") == "TRANSIT-7":
+            matches.append(SEMANTIC_DENIAL_RULE_IDS[5])
+        try:
+            arrival = date.fromisoformat(values.get("arrival_date", ""))
+        except (TypeError, ValueError):
+            arrival = None
+        try:
+            receipt = date.fromisoformat(values.get("packet_receipt_date", ""))
+        except (TypeError, ValueError):
+            receipt = SEMANTIC_POLICY_RULES.snapshot_receipt_date
+        if (
+            arrival is not None
+            and values.get("visa_class") not in {None, "DIP-1"}
+            and (receipt - arrival).days
+            > SEMANTIC_POLICY_RULES.stale_after_days
+        ):
+            matches.append(SEMANTIC_DENIAL_RULE_IDS[6])
+        try:
+            stay_duration = int(values.get("stay_duration_days", ""))
+        except (TypeError, ValueError):
+            stay_duration = None
+        visa_class = values.get("visa_class")
+        if (
+            stay_duration is not None
+            and stay_duration > 0
+            and visa_class in SEMANTIC_POLICY_RULES.stay_limits
+            and stay_duration > SEMANTIC_POLICY_RULES.stay_limits[visa_class]
+        ):
+            matches.append(SEMANTIC_DENIAL_RULE_IDS[7])
+        if visa_class == "MED-3" and values.get("biohazard_check") == "red":
+            matches.append(SEMANTIC_DENIAL_RULE_IDS[8])
         return tuple(matches)
 
     @staticmethod
@@ -524,6 +630,93 @@ class RapidOutputRecoveryProcessor:
         return (_REVIEW_APPROVAL_SNAPSHOT_DATE - arrival).days
 
     @classmethod
+    def _visible_approval_value(
+        cls,
+        *,
+        field_name: str,
+        primary_candidates: Iterable[CandidateEvidence],
+        primary_resolved: ResolvedCase,
+        rapid_candidates: Iterable[CandidateEvidence] = (),
+        rapid_resolved: ResolvedCase | None = None,
+    ) -> str | None:
+        primary = cls._visible_resolved_value(
+            case_id=primary_resolved.case_id,
+            resolved=primary_resolved,
+            field_name=field_name,
+            unsafe_pages=cls._unsafe_pages(primary_candidates),
+        )
+        if primary is not None:
+            return primary
+        primary_field = primary_resolved.fields.get(field_name)
+        if (
+            primary_field is None
+            or primary_field.state is not FieldState.UNKNOWN
+            or rapid_resolved is None
+            or (
+                primary_resolved.active_applicant is not None
+                and rapid_resolved.active_applicant
+                != primary_resolved.active_applicant
+            )
+        ):
+            return None
+        return cls._visible_resolved_value(
+            case_id=primary_resolved.case_id,
+            resolved=rapid_resolved,
+            field_name=field_name,
+            unsafe_pages=cls._unsafe_pages(rapid_candidates),
+        )
+
+    @classmethod
+    def _visible_clean_risk(
+        cls,
+        *,
+        primary_candidates: Iterable[CandidateEvidence],
+        primary_resolved: ResolvedCase,
+        rapid_candidates: Iterable[CandidateEvidence] = (),
+        rapid_resolved: ResolvedCase | None = None,
+    ) -> bool:
+        return cls._visible_approval_value(
+            field_name=RAPID_RISK_FIELD,
+            primary_candidates=primary_candidates,
+            primary_resolved=primary_resolved,
+            rapid_candidates=rapid_candidates,
+            rapid_resolved=rapid_resolved,
+        ) == "none"
+
+    @classmethod
+    def _visible_valid_fee(
+        cls,
+        *,
+        final_row: PredictionRow,
+        primary_candidates: Iterable[CandidateEvidence],
+        primary_resolved: ResolvedCase,
+        rapid_candidates: Iterable[CandidateEvidence] = (),
+        rapid_resolved: ResolvedCase | None = None,
+    ) -> bool:
+        def value(field_name: str) -> str | None:
+            return cls._visible_approval_value(
+                field_name=field_name,
+                primary_candidates=primary_candidates,
+                primary_resolved=primary_resolved,
+                rapid_candidates=rapid_candidates,
+                rapid_resolved=rapid_resolved,
+            )
+
+        fee_status = value("fee_status")
+        if fee_status != final_row.fee_status:
+            return False
+        return bool(
+            fee_status == "paid"
+            or (
+                fee_status == "waived"
+                and (
+                    value("visa_class") == "DIP-1"
+                    or value("hardship_waiver") == "valid"
+                )
+            )
+        )
+
+    @classmethod
     def _review_approval_head(
         cls,
         *,
@@ -537,14 +730,28 @@ class RapidOutputRecoveryProcessor:
         """Apply the frozen identity-free three-branch review approval head.
 
         Existing primary or Rapid authority always vetoes this lower-precedence
-        statistical recovery.  Candidate values and identities are never read:
-        the first branch uses only the count of primary applicant candidates.
+        statistical recovery. Every branch requires trusted clean-risk and
+        policy-valid fee evidence; the first branch otherwise uses only the
+        count of primary applicant candidates.
         """
 
         if (
             final_row.adjudication != "NEEDS_REVIEW"
             or " ".join(final_row.risk_flags.strip().split()).casefold()
             != "none"
+            or not cls._visible_clean_risk(
+                primary_candidates=primary_candidates,
+                primary_resolved=primary_resolved,
+                rapid_candidates=rapid_candidates,
+                rapid_resolved=rapid_resolved,
+            )
+            or not cls._visible_valid_fee(
+                final_row=final_row,
+                primary_candidates=primary_candidates,
+                primary_resolved=primary_resolved,
+                rapid_candidates=rapid_candidates,
+                rapid_resolved=rapid_resolved,
+            )
             or cls._primary_authoritative_decision(primary_outcome)
             or (
                 rapid_resolved is not None
@@ -727,7 +934,19 @@ class RapidOutputRecoveryProcessor:
             or final_row.visa_class != "XW-1"
             or " ".join(final_row.risk_flags.strip().split()).casefold()
             != "none"
-            or final_row.fee_status not in {"paid", "waived"}
+            or not cls._visible_clean_risk(
+                primary_candidates=primary_candidates,
+                primary_resolved=primary_resolved,
+                rapid_candidates=rapid_candidates,
+                rapid_resolved=rapid_resolved,
+            )
+            or not cls._visible_valid_fee(
+                final_row=final_row,
+                primary_candidates=primary_candidates,
+                primary_resolved=primary_resolved,
+                rapid_candidates=rapid_candidates,
+                rapid_resolved=rapid_resolved,
+            )
             or not cls._complete_review_output(final_row)
             or trace.denial_reasons
             or cls._primary_authoritative_decision(primary_outcome)
@@ -1126,29 +1345,44 @@ class RapidOutputRecoveryProcessor:
         primary_outcome: AdjudicationOutcome,
         unknown_fields: frozenset[str],
         recover_risk: bool,
+        source_repaired_fields: frozenset[str],
     ) -> PredictionRow:
         rapid_candidates = tuple(self._rapid_extractor().extract(rendered))
         rapid_linked = self._linker.link(rendered.case_id, rapid_candidates)
         rapid_resolved = self._resolver.resolve(rapid_linked)
         payload = primary_row.to_dict()
+        rapid_scope_matches = (
+            primary_resolved.active_applicant is None
+            or rapid_resolved.active_applicant
+            == primary_resolved.active_applicant
+        )
 
         # Overlay only fields whose primary state is truly UNKNOWN.  Starting
         # from the primary row preserves its existing serialization priors
         # whenever Rapid is also unresolved.
         for field_name in unknown_fields:
+            if not rapid_scope_matches:
+                continue
             if field_name == "applicant_name":
                 value = rapid_linked.active_applicant
             else:
                 value = self._rapid_value(rapid_resolved, field_name)
-            # ``unknown`` is a schema-valid fee literal, but it is not a
-            # recovered fact.  Keep the primary serialization prior (``paid``)
-            # when both OCR passes remain substantively unresolved.
-            if value is not None and not (
-                field_name == "fee_status" and value == "unknown"
+            if (
+                field_name == "fee_status"
+                and value == "unknown"
+                and self._visible_resolved_value(
+                    case_id=primary_resolved.case_id,
+                    resolved=rapid_resolved,
+                    field_name=field_name,
+                    unsafe_pages=self._unsafe_pages(rapid_candidates),
+                )
+                != value
             ):
+                continue
+            if value is not None:
                 payload[field_name] = value
 
-        if recover_risk:
+        if recover_risk and rapid_scope_matches:
             rapid_risk = self._rapid_value(rapid_resolved, RAPID_RISK_FIELD)
             if rapid_risk not in {None, "none"}:
                 payload[RAPID_RISK_FIELD] = rapid_risk
@@ -1177,9 +1411,16 @@ class RapidOutputRecoveryProcessor:
             primary_outcome=primary_outcome,
             unknown_fields=unknown_fields,
             recover_risk=recover_risk,
+            source_repaired_fields=source_repaired_fields,
         ):
             payload["adjudication"] = "DENIED"
             payload["confidence"] = SEMANTIC_DENIAL_CONFIDENCE
+        elif (
+            payload.get("fee_status") == "unknown"
+            and payload.get("adjudication") != "DENIED"
+            and not self._primary_authoritative_decision(primary_outcome)
+        ):
+            payload["adjudication"] = "NEEDS_REVIEW"
         final_row = PredictionRow.from_mapping(
             payload,
             fallback_case_id=primary_row.case_id,
@@ -1211,6 +1452,25 @@ class RapidOutputRecoveryProcessor:
             primary_candidates=primary_candidates,
             primary_resolved=primary_resolved,
         )
+        if source_repaired_fields and self._semantic_denial_rules(
+            case_id=primary_resolved.case_id,
+            payload=primary_row.to_dict(),
+            primary_candidates=primary_candidates,
+            rapid_candidates=(),
+            primary_resolved=primary_resolved,
+            rapid_resolved=primary_resolved,
+            primary_outcome=primary_outcome,
+            unknown_fields=frozenset(),
+            recover_risk=False,
+            source_repaired_fields=source_repaired_fields,
+        ):
+            payload = primary_row.to_dict()
+            payload["adjudication"] = "DENIED"
+            payload["confidence"] = SEMANTIC_DENIAL_CONFIDENCE
+            primary_row = PredictionRow.from_mapping(
+                payload,
+                fallback_case_id=primary_row.case_id,
+            )
 
         unknown_fields = self._unknown_output_fields(primary_resolved)
         if repaired_applicant:
@@ -1239,6 +1499,7 @@ class RapidOutputRecoveryProcessor:
                 primary_outcome=primary_outcome,
                 unknown_fields=unknown_fields,
                 recover_risk=recover_risk,
+                source_repaired_fields=source_repaired_fields,
             )
         except Exception:
             # RapidOCR is optional recovery, never a reason to lose a primary

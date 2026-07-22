@@ -106,14 +106,19 @@ class ReviewDenialRecoveryAdjudicator:
         return (_SNAPSHOT_DATE - arrival).days > 365
 
     @staticmethod
-    def _visible_diplomatic_visa(resolved_case: ResolvedCase) -> bool:
-        field = resolved_case.fields.get("visa_class")
+    def _visible_value(
+        resolved_case: ResolvedCase,
+        field_name: str,
+    ) -> str | None:
+        field = resolved_case.fields.get(field_name)
         evidence = field.winning_evidence if field is not None else None
-        return bool(
+        if not (
             field is not None
             and field.state is FieldState.RESOLVED
-            and field.value == "DIP-1"
+            and field.value is not None
             and evidence is not None
+            and evidence.field_name == field_name
+            and evidence.value == field.value
             and evidence.legible
             and not evidence.superseded
             and evidence.source == "visible_ocr"
@@ -123,6 +128,31 @@ class ReviewDenialRecoveryAdjudicator:
             and evidence.case_id_hint in {None, resolved_case.case_id}
             and evidence.applicant_hint
             in {None, resolved_case.active_applicant}
+        ):
+            return None
+        return field.value
+
+    @classmethod
+    def _visible_diplomatic_visa(cls, resolved_case: ResolvedCase) -> bool:
+        return cls._visible_value(resolved_case, "visa_class") == "DIP-1"
+
+    @classmethod
+    def _visible_clean_risk(cls, resolved_case: ResolvedCase) -> bool:
+        return cls._visible_value(resolved_case, "risk_flags") == "none"
+
+    @classmethod
+    def _visible_valid_fee(cls, resolved_case: ResolvedCase) -> bool:
+        fee_status = cls._visible_value(resolved_case, "fee_status")
+        return bool(
+            fee_status == "paid"
+            or (
+                fee_status == "waived"
+                and (
+                    cls._visible_diplomatic_visa(resolved_case)
+                    or cls._visible_value(resolved_case, "hardship_waiver")
+                    == "valid"
+                )
+            )
         )
 
     @classmethod
@@ -186,11 +216,22 @@ class ReviewDenialRecoveryAdjudicator:
 
         # An approval recovery must never erase an explicit policy denial,
         # including one supplied by a malformed/custom baseline.
-        if outcome.trace.denial_reasons:
+        reasons = frozenset(outcome.trace.review_reasons)
+        if (
+            outcome.trace.denial_reasons
+            or not cls._visible_clean_risk(resolved_case)
+            or not cls._visible_valid_fee(resolved_case)
+            or reasons.intersection(
+                {
+                    "fee_status_unknown",
+                    "required_output_unknown:fee_status",
+                    "required_output_not_visible:fee_status",
+                }
+            )
+        ):
             return ()
 
         confidence = outcome.row.confidence
-        reasons = frozenset(outcome.trace.review_reasons)
         facts = frozenset(outcome.trace.approval_facts)
         current_application = "application_date_current_or_exempt" in facts
         matches: list[str] = []
