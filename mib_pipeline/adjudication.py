@@ -12,7 +12,12 @@ from typing import Iterable, Mapping, Protocol
 
 from .extraction import CandidateEvidence, EvidenceType
 from .models import PredictionRow
-from .resolution import FieldState, ResolvedCase, ResolvedField
+from .resolution import (
+    EvidencePrecedenceHierarchy,
+    FieldState,
+    ResolvedCase,
+    ResolvedField,
+)
 
 
 VISA_CLASSES = frozenset({"XW-1", "XW-2", "DIP-1", "MED-3", "TRANSIT-7"})
@@ -231,6 +236,13 @@ class PolicyRuleSet:
     # date still takes precedence below.
     snapshot_receipt_date: date = date(2026, 7, 7)
 
+    def effective_receipt_date(self, receipt: date | None) -> date:
+        """Use only receipt dates possible at the published snapshot."""
+
+        if receipt is None or receipt > self.snapshot_receipt_date:
+            return self.snapshot_receipt_date
+        return receipt
+
 
 @dataclass(frozen=True)
 class DecisionTrace:
@@ -268,13 +280,29 @@ def _value(resolved_case: ResolvedCase, field_name: str) -> str | None:
 
 def _is_visible(field: ResolvedField | None) -> bool:
     evidence = field.winning_evidence if field is not None else None
-    return bool(
+    if not (
         field is not None
         and field.state is FieldState.RESOLVED
         and evidence is not None
         and evidence.legible
         and evidence.source == "visible_ocr"
         and evidence.evidence_type is not EvidenceType.TEXT_LAYER
+    ):
+        return False
+    winner_rank = EvidencePrecedenceHierarchy.rank(evidence.evidence_type)
+    return not any(
+        candidate.source == "visible_ocr"
+        and candidate.evidence_type is not EvidenceType.TEXT_LAYER
+        and not candidate.legible
+        and not candidate.superseded
+        and "explicit_unreadable" in candidate.visual_cues
+        and not {
+            "strikethrough",
+            "sample_denial_watermark",
+        }.intersection(candidate.visual_cues)
+        and EvidencePrecedenceHierarchy.rank(candidate.evidence_type)
+        < winner_rank
+        for candidate in field.considered
     )
 
 
@@ -510,10 +538,8 @@ class AdjudicationEngine:
             return False
         receipt_field = _field(resolved_case, "packet_receipt_date")
         receipt = _parse_date(_value(resolved_case, "packet_receipt_date"))
-        effective_receipt = (
-            receipt
-            if receipt is not None and _is_visible(receipt_field)
-            else self._rules.snapshot_receipt_date
+        effective_receipt = self._rules.effective_receipt_date(
+            receipt if _is_visible(receipt_field) else None
         )
         return (effective_receipt - arrival).days > self._rules.stale_after_days
 
@@ -694,10 +720,8 @@ class AdjudicationEngine:
         elif not _is_visible(_field(resolved_case, "arrival_date")):
             review_reasons.append("arrival_date_not_visible")
         else:
-            effective_receipt = (
-                receipt
-                if receipt is not None and _is_visible(receipt_field)
-                else self._rules.snapshot_receipt_date
+            effective_receipt = self._rules.effective_receipt_date(
+                receipt if _is_visible(receipt_field) else None
             )
             age_days = (effective_receipt - arrival).days
             if age_days > self._rules.stale_after_days:

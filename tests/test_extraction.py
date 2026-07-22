@@ -220,6 +220,7 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertEqual(normalize("declared_purpose", "xenchotany"), "xenobotany")
         self.assertEqual(normalize("fee_status", "pad"), "paid")
         self.assertEqual(normalize("fee_status", "pold"), "paid")
+        self.assertIsNone(normalize("fee_status", "naird"))
         for raw, expected in {
             "pal": "paid",
             "pag": "paid",
@@ -642,6 +643,30 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertTrue(
             all(item.evidence_type is EvidenceType.INTAKE_FORM for item in candidates)
         )
+
+    def test_literal_unreadable_is_preserved_as_a_visual_cue(self):
+        class Refiner:
+            def __init__(self):
+                self.calls = 0
+
+            def refine(self, page, line):
+                self.calls += 1
+                return "Arrival Date: 2026-07-05", 0.9
+
+        refiner = Refiner()
+        extractor = VisibleEvidenceExtractor(
+            ocr_engine=FakeOcrEngine(
+                (token("Arrival Date: UNREADABLE", 1, 0.6),)
+            ),
+            cue_detector=NoCueDetector(),
+            refinement_model=refiner,
+        )
+
+        candidate = extractor.extract(self.rendered_case())[0]
+
+        self.assertFalse(candidate.legible)
+        self.assertIn("explicit_unreadable", candidate.visual_cues)
+        self.assertEqual(refiner.calls, 0)
 
     def test_body_phrase_cannot_promote_intake_decision_to_authoritative(self):
         tokens = [
@@ -1345,6 +1370,26 @@ class VisibleEvidenceTests(unittest.TestCase):
         self.assertEqual(
             [engine.calls for engine in threshold_engines],
             [[0], [0], [0], [0]],
+        )
+
+        ambiguous = tuple(
+            FakeOcrEngine(receipt_tokens(value))
+            for value in ("naird", "naird", "naird", None)
+        )
+        abstained = VisibleEvidenceExtractor(
+            ocr_engine=FakeOcrEngine(primary.tokens),
+            cue_detector=NoCueDetector(),
+            consensus_retry=False,
+            fee_receipt_retry=True,
+            fee_receipt_ocr_engines=ambiguous,
+            sparse_intake_retry=False,
+        ).extract(self.rendered_case())
+
+        self.assertFalse(
+            any(
+                "threshold_consensus_fee_receipt" in item.visual_cues
+                for item in abstained
+            )
         )
 
         only_two = tuple(

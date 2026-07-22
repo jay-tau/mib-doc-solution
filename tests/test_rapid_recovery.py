@@ -1442,6 +1442,61 @@ class RapidOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(result.adjudication, "NEEDS_REVIEW")
         self.assertEqual(result.confidence, 0.37)
 
+    def test_semantic_staleness_rejects_future_packet_receipt_date(self):
+        primary_visa = evidence("visa_class", "XW-2")
+        future_receipt = evidence("packet_receipt_date", "2028-01-28")
+        recovered_arrival = evidence("arrival_date", "2026-01-28")
+        primary = resolved_case(
+            values={"packet_receipt_date": "2028-01-28"},
+            unknown={"arrival_date"},
+            considered={
+                "visa_class": (primary_visa,),
+                "packet_receipt_date": (future_receipt,),
+            },
+        )
+        rapid = resolved_case(
+            values={"arrival_date": "2026-01-28"},
+            considered={"arrival_date": (recovered_arrival,)},
+        )
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_candidates=(primary_visa, future_receipt),
+            rapid_candidates=(recovered_arrival,),
+        )
+
+        result = recovery.process_case(Path(CASE_ID + ".pdf"))
+
+        self.assertEqual(result.arrival_date, "2026-01-28")
+        self.assertEqual(result.adjudication, "NEEDS_REVIEW")
+        self.assertEqual(result.confidence, 0.37)
+
+    def test_semantic_head_ignores_value_below_explicit_unreadable(self):
+        unreadable = evidence(
+            "arrival_date",
+            None,
+            legible=False,
+            cues=("explicit_unreadable",),
+        )
+        registry = evidence(
+            "arrival_date",
+            "2025-01-01",
+            evidence_type=EvidenceType.REGISTRY_EXTRACT,
+        )
+        primary = resolved_case(
+            values={"arrival_date": "2025-01-01"},
+            considered={"arrival_date": (unreadable, registry)},
+        )
+
+        value = RapidOutputRecoveryProcessor._visible_resolved_value(
+            case_id=CASE_ID,
+            resolved=primary,
+            field_name="arrival_date",
+            unsafe_pages=frozenset(),
+        )
+
+        self.assertIsNone(value)
+
     def test_semantic_head_denies_visible_stay_and_med3_policy_facts(self):
         cases = (
             ("stay_duration_days", "31", "XW-1"),

@@ -1147,7 +1147,12 @@ class VisibleEvidenceExtractor:
                 return "unpaid" if fee_key == "umpaid" else "paid"
             if re.fullmatch(r"p[ao][i1l][dcl]", fee_key):
                 return "paid"
-            return _canonical_vocabulary_value(value, FEE_VALUES, cutoff=0.66)
+            return _canonical_vocabulary_value(
+                value,
+                FEE_VALUES,
+                cutoff=0.66,
+                margin=0.07,
+            )
         if field_name == "adjudication":
             candidate = value.upper().replace(" ", "_")
             return candidate if candidate in ADJUDICATION_VALUES else None
@@ -1462,7 +1467,7 @@ class VisibleEvidenceExtractor:
             text,
             FEE_VALUES,
             cutoff=0.62,
-            margin=0.06,
+            margin=0.07,
         )
 
     @classmethod
@@ -3583,10 +3588,17 @@ class VisibleEvidenceExtractor:
                     pending_field = (field_name, line, cues, evidence_type)
                     continue
 
+                explicit_unreadable = _ocr_key(raw_value) == "unreadable"
+                if explicit_unreadable:
+                    combined_cues = tuple(
+                        sorted(set(combined_cues) | {"explicit_unreadable"})
+                    )
+
                 confidence = source_line.confidence
                 if (
                     self._refinement_model is not None
                     and confidence < self._refinement_gate
+                    and not explicit_unreadable
                     and "strikethrough" not in combined_cues
                     and "sample_denial_watermark" not in combined_cues
                 ):
@@ -3603,7 +3615,6 @@ class VisibleEvidenceExtractor:
                             elif refined_match[0] == field_name:
                                 raw_value = refined_match[1]
                                 confidence = refined_confidence
-
                 normalized = self._normalize_value(field_name, raw_value)
                 minimum_confidence = self._minimum_legible_confidence
                 if (

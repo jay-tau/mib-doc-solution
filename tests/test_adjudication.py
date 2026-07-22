@@ -234,6 +234,51 @@ class AdjudicationPolicyTests(unittest.TestCase):
         self.assertIn("stale_application", stale.trace.denial_reasons)
         self.assertEqual(exempt.row.adjudication, "APPROVED")
 
+    def test_future_packet_receipt_uses_snapshot_fallback(self):
+        outcome = self.decision(
+            resolved_case(
+                visa_class="MED-3",
+                arrival_date="2026-01-28",
+                packet_receipt_date="2028-01-28",
+                risk_flags="illegible_biometrics",
+            )
+        )
+
+        self.assertEqual(outcome.row.adjudication, "NEEDS_REVIEW")
+        self.assertNotIn("stale_application", outcome.trace.denial_reasons)
+
+    def test_explicit_unreadable_blocks_approval_but_preserves_lower_output(self):
+        evidence = [
+            candidate(name, value)
+            for name, value in BASE_VALUES.items()
+            if name != "arrival_date"
+        ]
+        evidence.extend(
+            (
+                candidate(
+                    "arrival_date",
+                    None,
+                    legible=False,
+                    cues=("explicit_unreadable",),
+                ),
+                candidate(
+                    "arrival_date",
+                    "2026-07-05",
+                    EvidenceType.REGISTRY_EXTRACT,
+                    page=1,
+                ),
+            )
+        )
+        resolved = EvidencePrecedenceResolver().resolve(
+            CaseLinker().link("MIB-000001", evidence)
+        )
+
+        outcome = self.decision(resolved)
+
+        self.assertEqual(outcome.row.arrival_date, "2026-07-05")
+        self.assertEqual(outcome.row.adjudication, "NEEDS_REVIEW")
+        self.assertIn("arrival_date_not_visible", outcome.trace.review_reasons)
+
     def test_unknown_sponsor_reviews_but_barred_sponsor_denies(self):
         missing = self.decision(resolved_case(omit=("sponsor_id",)))
         barred = self.decision(resolved_case(sponsor_id="SPN-0139"))

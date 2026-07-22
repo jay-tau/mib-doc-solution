@@ -27,7 +27,12 @@ from .extraction import (
 )
 from .ingestion import Rect, RenderedCase, RenderedPage
 from .models import PredictionRow
-from .resolution import FieldState, ResolvedCase, ResolvedField
+from .resolution import (
+    EvidencePrecedenceHierarchy,
+    FieldState,
+    ResolvedCase,
+    ResolvedField,
+)
 
 
 # These are the scored output values for which the frozen liberal recovery was
@@ -431,6 +436,19 @@ class RapidOutputRecoveryProcessor:
             or RAPID_BAD_CUES.intersection(evidence.visual_cues)
         ):
             return None
+        winner_rank = EvidencePrecedenceHierarchy.rank(evidence.evidence_type)
+        if any(
+            candidate.source == "visible_ocr"
+            and candidate.evidence_type is not EvidenceType.TEXT_LAYER
+            and not candidate.legible
+            and not candidate.superseded
+            and "explicit_unreadable" in candidate.visual_cues
+            and not RAPID_BAD_CUES.intersection(candidate.visual_cues)
+            and EvidencePrecedenceHierarchy.rank(candidate.evidence_type)
+            < winner_rank
+            for candidate in resolved_field.considered
+        ):
+            return None
         return resolved_field.value
 
     @staticmethod
@@ -591,7 +609,8 @@ class RapidOutputRecoveryProcessor:
         try:
             receipt = date.fromisoformat(values.get("packet_receipt_date", ""))
         except (TypeError, ValueError):
-            receipt = SEMANTIC_POLICY_RULES.snapshot_receipt_date
+            receipt = None
+        receipt = SEMANTIC_POLICY_RULES.effective_receipt_date(receipt)
         if (
             arrival is not None
             and values.get("visa_class") not in {None, "DIP-1"}
