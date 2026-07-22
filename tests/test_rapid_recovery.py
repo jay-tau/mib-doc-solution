@@ -7,6 +7,7 @@ from mib_pipeline.extraction import CandidateEvidence, EvidenceType
 from mib_pipeline.ingestion import Rect
 from mib_pipeline.models import PredictionRow
 from mib_pipeline.rapid_recovery import (
+    AUTHORITATIVE_RAPID_DECISION_CONFIDENCE,
     RapidOcrEngine,
     RapidOutputRecoveryProcessor,
     REVIEW_APPROVAL_CONFIDENCE,
@@ -981,10 +982,16 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                     values={"risk_flags": risk_flag},
                     considered={"risk_flags": (recovered,)},
                 )
+                low_authority = evidence(
+                    "adjudication",
+                    "APPROVED",
+                    evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
+                    confidence=0.30,
+                )
                 recovery, *_rest = processor(
                     primary,
                     rapid,
-                    rapid_candidates=(recovered,),
+                    rapid_candidates=(recovered, low_authority),
                 )
 
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
@@ -1544,7 +1551,10 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
                 self.assertEqual(result.adjudication, signed_decision)
-                self.assertEqual(result.confidence, primary_row.confidence)
+                self.assertEqual(
+                    result.confidence,
+                    AUTHORITATIVE_RAPID_DECISION_CONFIDENCE,
+                )
 
     def test_xw1_multisource_recovery_requires_a_policy_valid_fee(self):
         required_facts = (
@@ -2046,6 +2056,35 @@ class RapidOutputRecoveryTests(unittest.TestCase):
             REVIEW_APPROVAL_CONFIDENCE,
         )
 
+    def test_review_approval_head_vetoes_contested_resolution(self):
+        six_names = tuple(
+            evidence("applicant_name", APPLICANT, page=page)
+            for page in range(6)
+        )
+        clean_risk = evidence(
+            "risk_flags",
+            "none",
+            evidence_type=EvidenceType.BIOMETRIC_SLIP,
+        )
+        paid_fee = evidence("fee_status", "paid")
+        considered = {
+            "risk_flags": (clean_risk,),
+            "fee_status": (paid_fee,),
+        }
+        recovery, *_rest = processor(
+            resolved_case(
+                contested={"home_world"},
+                considered=considered,
+            ),
+            resolved_case(),
+            primary_candidates=six_names + (clean_risk, paid_fee),
+        )
+
+        self.assertEqual(
+            recovery.process_case(Path(CASE_ID + ".pdf")),
+            row(),
+        )
+
     def test_review_approval_head_runs_after_rapid_output_recovery(self):
         six_applicant_candidates = tuple(
             evidence("applicant_name", APPLICANT, page=page)
@@ -2229,6 +2268,7 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                     "adjudication",
                     "DENIED",
                     evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
+                    confidence=0.899,
                 ),
             ),
             (
@@ -2277,6 +2317,33 @@ class RapidOutputRecoveryTests(unittest.TestCase):
                 result = recovery.process_case(Path(CASE_ID + ".pdf"))
 
                 self.assertEqual(result, primary_row)
+
+        low_conflict = (
+            evidence(
+                "adjudication",
+                "APPROVED",
+                evidence_type=EvidenceType.ADJUDICATOR_STAMP,
+                confidence=0.20,
+            ),
+            evidence(
+                "adjudication",
+                "DENIED",
+                evidence_type=EvidenceType.SIGNED_MANUAL_NOTE,
+                confidence=0.30,
+            ),
+        )
+        primary_denied = row(adjudication="DENIED", confidence=0.61)
+        recovery, *_rest = processor(
+            primary,
+            rapid,
+            primary_outcome=outcome(primary_denied),
+            rapid_candidates=low_conflict,
+        )
+
+        self.assertEqual(
+            recovery.process_case(Path(CASE_ID + ".pdf")),
+            primary_denied,
+        )
 
         approved = row(adjudication="APPROVED", confidence=0.98)
         conflicting = (

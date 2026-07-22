@@ -219,6 +219,8 @@ class ReviewDenialRecoveryAdjudicator:
         reasons = frozenset(outcome.trace.review_reasons)
         if (
             outcome.trace.denial_reasons
+            or resolved_case.unresolved_linkage
+            or resolved_case.contested_fields
             or not cls._visible_clean_risk(resolved_case)
             or not cls._visible_valid_fee(resolved_case)
             or reasons.intersection(

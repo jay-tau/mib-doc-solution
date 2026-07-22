@@ -595,6 +595,25 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
                 recovered, _baseline = recover(original, resolved_case())
                 self.assertIs(recovered, original)
 
+    def test_approval_rules_veto_contested_policy_evidence(self):
+        original = outcome(
+            review_reasons=("visa_class_unknown",),
+            approval_facts=(self.CURRENT_APPLICATION,),
+            prediction=row(confidence=0.25),
+        )
+        contested_home = replace(
+            visible_field("home_world", "TRAPPIST-1e"),
+            state=FieldState.CONTESTED,
+            value=None,
+            winning_evidence=None,
+        )
+        recovered, _baseline = recover(
+            original,
+            resolved_case(self.CLEAN_RISK, self.PAID_FEE, contested_home),
+        )
+
+        self.assertIs(recovered, original)
+
     def test_denial_recovery_has_priority_over_every_new_approval_rule(self):
         cases = (
             outcome(

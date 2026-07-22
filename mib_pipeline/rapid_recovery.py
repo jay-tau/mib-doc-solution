@@ -59,6 +59,7 @@ AUTHORITATIVE_RAPID_TYPES = frozenset(
     {EvidenceType.ADJUDICATOR_STAMP, EvidenceType.SIGNED_MANUAL_NOTE}
 )
 AUTHORITATIVE_MINIMUM_CONFIDENCE = 0.90
+AUTHORITATIVE_RAPID_DECISION_CONFIDENCE = 0.98
 BIOMETRIC_APPLICANT_MINIMUM_CONFIDENCE = 0.80
 SOURCE_PRIORITY_MINIMUM_CONFIDENCE = 0.90
 RAPID_BAD_CUES = frozenset({"strikethrough", "sample_denial_watermark"})
@@ -321,7 +322,6 @@ class RapidOutputRecoveryProcessor:
             and candidate.evidence_type in AUTHORITATIVE_RAPID_TYPES
             and candidate.legible
             and not candidate.superseded
-            and candidate.ocr_confidence >= AUTHORITATIVE_MINIMUM_CONFIDENCE
             and candidate.source == "visible_ocr"
             and candidate.case_id_hint == case_id
             and candidate.applicant_hint in {None, active_applicant}
@@ -330,7 +330,14 @@ class RapidOutputRecoveryProcessor:
         decisions = {candidate.value for candidate in eligible}
         if not decisions:
             return None
-        return next(iter(decisions)) if len(decisions) == 1 else "NEEDS_REVIEW"
+        if not any(
+            candidate.ocr_confidence >= AUTHORITATIVE_MINIMUM_CONFIDENCE
+            for candidate in eligible
+        ):
+            return None
+        if len(decisions) != 1:
+            return "NEEDS_REVIEW"
+        return next(iter(decisions))
 
     @staticmethod
     def _primary_authoritative_decision(outcome: AdjudicationOutcome) -> bool:
@@ -735,8 +742,14 @@ class RapidOutputRecoveryProcessor:
         count of primary applicant candidates.
         """
 
+        trace = primary_outcome.trace
         if (
             final_row.adjudication != "NEEDS_REVIEW"
+            or primary_outcome.row.adjudication != "NEEDS_REVIEW"
+            or trace.decision != "NEEDS_REVIEW"
+            or trace.denial_reasons
+            or primary_resolved.unresolved_linkage
+            or primary_resolved.contested_fields
             or " ".join(final_row.risk_flags.strip().split()).casefold()
             != "none"
             or not cls._visible_clean_risk(
@@ -762,6 +775,14 @@ class RapidOutputRecoveryProcessor:
                     rapid_candidates=rapid_candidates,
                 )
             )
+            or (
+                rapid_resolved is not None
+                and (
+                    rapid_resolved.case_id != primary_resolved.case_id
+                    or rapid_resolved.unresolved_linkage
+                    or rapid_resolved.contested_fields
+                )
+            )
         ):
             return final_row
 
@@ -773,7 +794,6 @@ class RapidOutputRecoveryProcessor:
         arrival_age = cls._review_approval_arrival_age(
             final_row.arrival_date
         )
-        trace = primary_outcome.trace
         matches = bool(
             applicant_candidate_count > 5
             or (
@@ -1387,9 +1407,9 @@ class RapidOutputRecoveryProcessor:
             if rapid_risk not in {None, "none"}:
                 payload[RAPID_RISK_FIELD] = rapid_risk
 
-        # Ordinary output recovery and the signed-decision override preserve
-        # primary identity and calibration. The frozen semantic denial head
-        # below is the only calibrated exception.
+        # Ordinary output recovery preserves primary identity and calibration.
+        # A changed signed decision and the semantic denial head use their
+        # separately pinned confidence values below.
         payload["case_id"] = primary_row.case_id
         payload["confidence"] = primary_row.confidence
 
@@ -1400,6 +1420,8 @@ class RapidOutputRecoveryProcessor:
             rapid_candidates=rapid_candidates,
         )
         if decision is not None:
+            if decision != payload.get("adjudication"):
+                payload["confidence"] = AUTHORITATIVE_RAPID_DECISION_CONFIDENCE
             payload["adjudication"] = decision
         elif self._semantic_denial_rules(
             case_id=primary_resolved.case_id,
