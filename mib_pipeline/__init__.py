@@ -41,7 +41,6 @@ from .confidence import (
 )
 from .decision_recovery import (
     REVIEW_APPROVAL_CONFIDENCE,
-    REVIEW_DENIAL_CONFIDENCE,
     REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE,
     ReviewDenialRecoveryAdjudicator,
 )
@@ -111,7 +110,6 @@ __all__ = [
     "RecoverableRenderError",
     "RecoverableOcrError",
     "REVIEW_APPROVAL_CONFIDENCE",
-    "REVIEW_DENIAL_CONFIDENCE",
     "REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE",
     "RAPID_OUTPUT_FIELDS",
     "RapidOcrEngine",

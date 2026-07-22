@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
 from typing import Protocol
 
 from .adjudication import AdjudicationOutcome
@@ -12,22 +11,18 @@ from .models import PredictionRow
 from .resolution import FieldState, ResolvedCase
 
 
-REVIEW_DENIAL_CONFIDENCE = 0.551819438046983
 REVIEW_APPROVAL_CONFIDENCE = 0.98
 # Kept as a public compatibility alias for the first approval recovery head.
 REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE = REVIEW_APPROVAL_CONFIDENCE
-_SNAPSHOT_DATE = date(2026, 7, 7)
 _MAXIMUM_BASELINE_CONFIDENCE = 0.35
 _MAXIMUM_DIPLOMATIC_APPROVAL_BASELINE_CONFIDENCE = 0.25
 _MAXIMUM_SPONSOR_XW1_APPROVAL_BASELINE_CONFIDENCE = 0.20
 _MINIMUM_CURRENT_VISA_UNKNOWN_APPROVAL_BASELINE_CONFIDENCE = 0.20
 _MAXIMUM_CURRENT_VISA_UNKNOWN_APPROVAL_BASELINE_CONFIDENCE = 0.25
 _FEE_RECEIPT_MARKER = "page_type_present_fee_receipt"
-_OTHER_MARKER = "page_type_present_other"
 _SPONSOR_ATTESTATION_MARKER = "page_type_present_sponsor_attestation"
 _MARKER_CUES = {
     _FEE_RECEIPT_MARKER: "packet_page_type:fee_receipt",
-    _OTHER_MARKER: "packet_page_type:other",
     _SPONSOR_ATTESTATION_MARKER: "packet_page_type:sponsor_attestation",
 }
 
@@ -92,18 +87,6 @@ class ReviewDenialRecoveryAdjudicator:
             and cue in evidence.visual_cues
         }
         return len(pages)
-
-    @staticmethod
-    def _arrival_is_stale_gt365(row: PredictionRow) -> bool:
-        # This schema fallback means "unresolved"; it is not visible evidence
-        # of an old arrival and must never trigger a pre-Rapid denial.
-        if row.arrival_date == "1900-01-01":
-            return False
-        try:
-            arrival = date.fromisoformat(row.arrival_date)
-        except ValueError:
-            return False
-        return (_SNAPSHOT_DATE - arrival).days > 365
 
     @staticmethod
     def _visible_value(
@@ -178,35 +161,6 @@ class ReviewDenialRecoveryAdjudicator:
         )
 
     @classmethod
-    def _matching_rules(
-        cls,
-        resolved_case: ResolvedCase,
-        outcome: AdjudicationOutcome,
-    ) -> tuple[str, ...]:
-        reasons = frozenset(outcome.trace.review_reasons)
-        low_confidence = outcome.row.confidence <= _MAXIMUM_BASELINE_CONFIDENCE
-        matches: list[str] = []
-        if (
-            low_confidence
-            and "clean_biohazard_check_missing" in reasons
-            and cls._visible_marker(resolved_case, _OTHER_MARKER)
-        ):
-            matches.append("review_denial_other_missing_biohazard")
-        if (
-            low_confidence
-            and cls._arrival_is_stale_gt365(outcome.row)
-            and cls._visible_marker(resolved_case, _SPONSOR_ATTESTATION_MARKER)
-        ):
-            matches.append("review_denial_sponsor_stale_gt365")
-        if {
-            "required_output_unknown:home_world",
-            "required_output_unknown:risk_flags",
-            "required_output_unknown:sponsor_id",
-        }.issubset(reasons):
-            matches.append("review_denial_three_required_outputs_unknown")
-        return tuple(matches)
-
-    @classmethod
     def _matching_approval_rules(
         cls,
         resolved_case: ResolvedCase,
@@ -225,6 +179,7 @@ class ReviewDenialRecoveryAdjudicator:
             or not cls._visible_valid_fee(resolved_case)
             or reasons.intersection(
                 {
+                    "clean_biohazard_check_missing",
                     "fee_status_unknown",
                     "required_output_unknown:fee_status",
                     "required_output_not_visible:fee_status",
@@ -275,23 +230,6 @@ class ReviewDenialRecoveryAdjudicator:
             or baseline.trace.decision != "NEEDS_REVIEW"
         ):
             return baseline
-        matching_rules = self._matching_rules(resolved_case, baseline)
-        if matching_rules:
-            trace = replace(
-                baseline.trace,
-                decision="DENIED",
-                authoritative_source=False,
-                denial_reasons=tuple(
-                    sorted(set(baseline.trace.denial_reasons) | set(matching_rules))
-                ),
-            )
-            row = replace(
-                baseline.row,
-                adjudication="DENIED",
-                confidence=REVIEW_DENIAL_CONFIDENCE,
-            )
-            return AdjudicationOutcome(row=row, trace=trace)
-
         matching_approval_rules = self._matching_approval_rules(
             resolved_case,
             baseline,

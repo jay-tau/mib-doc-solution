@@ -13,7 +13,6 @@ from mib_pipeline import (
     PredictionRow,
     Rect,
     REVIEW_APPROVAL_CONFIDENCE,
-    REVIEW_DENIAL_CONFIDENCE,
     REVIEW_DIPLOMATIC_APPROVAL_CONFIDENCE,
     RenderedPage,
     ResolvedCase,
@@ -51,14 +50,12 @@ def outcome(
     denial_reasons=(),
     approval_facts=("fee_paid",),
     prediction=None,
-    trace_decision=None,
 ):
     prediction = prediction or row()
-    decision = trace_decision or prediction.adjudication
     return AdjudicationOutcome(
         row=prediction,
         trace=DecisionTrace(
-            decision=decision,
+            decision=prediction.adjudication,
             authoritative_source=False,
             denial_reasons=tuple(denial_reasons),
             review_reasons=tuple(review_reasons),
@@ -382,32 +379,6 @@ class ReviewDiplomaticApprovalRecoveryTests(unittest.TestCase):
                 recovered, _baseline = recover(original, resolved)
                 self.assertIs(recovered, original)
 
-    def test_denial_recovery_has_priority_over_approval_recovery(self):
-        sponsor = marker(
-            "page_type_present_sponsor_attestation",
-            "sponsor_attestation",
-        )
-        original = outcome(
-            approval_facts=("diplomatic_sponsor_exemption",),
-            prediction=row(
-                arrival_date="2025-01-01",
-                visa_class="DIP-1",
-                confidence=0.25,
-            ),
-        )
-
-        recovered, _baseline = recover(
-            original,
-            resolved_case(self.FEE, sponsor),
-        )
-
-        self.assertEqual(recovered.row.adjudication, "DENIED")
-        self.assertIn(
-            "review_denial_sponsor_stale_gt365",
-            recovered.trace.denial_reasons,
-        )
-
-
 class ReviewApprovalRecoveryTests(unittest.TestCase):
     SPONSOR = marker(
         "page_type_present_sponsor_attestation",
@@ -614,79 +585,53 @@ class ReviewApprovalRecoveryTests(unittest.TestCase):
 
         self.assertIs(recovered, original)
 
-    def test_denial_recovery_has_priority_over_every_new_approval_rule(self):
-        cases = (
-            outcome(
-                review_reasons=("clean_biohazard_check_missing",),
-                prediction=row(visa_class="XW-1", confidence=0.20),
+    def test_missing_clean_biohazard_evidence_vetoes_approval_recovery(self):
+        original = outcome(
+            review_reasons=(
+                "clean_biohazard_check_missing",
+                "required_output_unknown:home_world",
             ),
-            outcome(
-                review_reasons=(
-                    "clean_biohazard_check_missing",
-                    "visa_class_unknown",
-                ),
-                approval_facts=(self.CURRENT_APPLICATION,),
-                prediction=row(confidence=0.25),
-            ),
-            outcome(
-                review_reasons=(
-                    "clean_biohazard_check_missing",
-                    "required_output_unknown:home_world",
-                ),
-                approval_facts=(self.CURRENT_APPLICATION,),
-                prediction=row(confidence=0.35),
+            approval_facts=(self.CURRENT_APPLICATION,),
+            prediction=row(confidence=0.35),
+        )
+
+        recovered, _baseline = recover(
+            original,
+            resolved_case(
+                visible_field("risk_flags", "none"),
+                self.PAID_FEE,
             ),
         )
-        for original in cases:
-            with self.subTest(
-                confidence=original.row.confidence,
-                review_reasons=original.trace.review_reasons,
-            ):
-                recovered, _baseline = recover(
-                    original,
-                    resolved_case(self.OTHER, self.SPONSOR),
-                )
-                self.assertEqual(recovered.row.adjudication, "DENIED")
-                self.assertIn(
-                    "review_denial_other_missing_biohazard",
-                    recovered.trace.denial_reasons,
-                )
 
+        self.assertIs(recovered, original)
 
-class ReviewDenialRecoveryTests(unittest.TestCase):
-    OTHER = marker("page_type_present_other", "other")
-    SPONSOR = marker(
-        "page_type_present_sponsor_attestation",
-        "sponsor_attestation",
-    )
+    def test_row_trace_mismatch_is_unchanged(self):
+        original = outcome(
+            review_reasons=("required_output_unknown:home_world",),
+            approval_facts=(self.CURRENT_APPLICATION,),
+            prediction=row(confidence=0.35),
+        )
+        malformed = replace(
+            original,
+            trace=replace(original.trace, decision="APPROVED"),
+        )
 
-    def assert_recovered(self, original, recovered, expected_reason):
-        self.assertEqual(recovered.row.adjudication, "DENIED")
-        self.assertEqual(recovered.row.confidence, REVIEW_DENIAL_CONFIDENCE)
-        self.assertEqual(recovered.trace.decision, "DENIED")
-        self.assertFalse(recovered.trace.authoritative_source)
-        self.assertIn(expected_reason, recovered.trace.denial_reasons)
-        original_values = original.row.to_dict()
-        recovered_values = recovered.row.to_dict()
-        for field_name in original_values:
-            if field_name not in {"adjudication", "confidence"}:
-                self.assertEqual(
-                    recovered_values[field_name],
-                    original_values[field_name],
-                    field_name,
-                )
+        recovered, _baseline = recover(
+            malformed,
+            resolved_case(self.CLEAN_RISK, self.PAID_FEE),
+        )
 
-    def test_all_three_frozen_rules_recover_review(self):
+        self.assertIs(recovered, malformed)
+
+    def test_packet_shape_never_guesses_a_denial(self):
         cases = (
             (
                 outcome(review_reasons=("clean_biohazard_check_missing",)),
                 resolved_case(self.OTHER),
-                "review_denial_other_missing_biohazard",
             ),
             (
                 outcome(prediction=row(arrival_date="2025-01-01")),
                 resolved_case(self.SPONSOR),
-                "review_denial_sponsor_stale_gt365",
             ),
             (
                 outcome(
@@ -697,109 +642,13 @@ class ReviewDenialRecoveryTests(unittest.TestCase):
                     )
                 ),
                 resolved_case(),
-                "review_denial_three_required_outputs_unknown",
             ),
         )
-        for original, resolved, reason in cases:
-            with self.subTest(reason=reason):
+        for original, resolved in cases:
+            with self.subTest(review_reasons=original.trace.review_reasons):
                 recovered, baseline = recover(original, resolved)
                 self.assertEqual(baseline.calls, 1)
-                self.assert_recovered(original, recovered, reason)
-
-    def test_rule_one_vetoes_missing_reason_marker_high_confidence_and_spoof(self):
-        baseline = outcome(review_reasons=("clean_biohazard_check_missing",))
-        variants = (
-            (outcome(), resolved_case(self.OTHER)),
-            (baseline, resolved_case()),
-            (
-                outcome(
-                    review_reasons=("clean_biohazard_check_missing",),
-                    prediction=row(confidence=0.350001),
-                ),
-                resolved_case(self.OTHER),
-            ),
-            (
-                baseline,
-                resolved_case(
-                    marker(
-                        "page_type_present_other",
-                        "other",
-                        source="text_layer",
-                    )
-                ),
-            ),
-        )
-        for original, resolved in variants:
-            with self.subTest(original=original, fields=tuple(resolved.fields)):
-                recovered, _baseline = recover(original, resolved)
                 self.assertIs(recovered, original)
-
-    def test_rule_two_vetoes_missing_marker_current_arrival_and_high_confidence(self):
-        stale = outcome(prediction=row(arrival_date="2025-01-01"))
-        variants = (
-            (stale, resolved_case()),
-            (
-                outcome(prediction=row(arrival_date="1900-01-01")),
-                resolved_case(self.SPONSOR),
-            ),
-            (outcome(prediction=row(arrival_date="2026-01-01")), resolved_case(self.SPONSOR)),
-            (
-                outcome(
-                    prediction=row(
-                        arrival_date="2025-01-01",
-                        confidence=0.350001,
-                    )
-                ),
-                resolved_case(self.SPONSOR),
-            ),
-        )
-        for original, resolved in variants:
-            with self.subTest(arrival=original.row.arrival_date):
-                recovered, _baseline = recover(original, resolved)
-                self.assertIs(recovered, original)
-
-    def test_rule_three_requires_each_of_its_three_reasons(self):
-        required = (
-            "required_output_unknown:home_world",
-            "required_output_unknown:risk_flags",
-            "required_output_unknown:sponsor_id",
-        )
-        for omitted in required:
-            with self.subTest(omitted=omitted):
-                original = outcome(
-                    review_reasons=tuple(
-                        reason for reason in required if reason != omitted
-                    )
-                )
-                recovered, _baseline = recover(original, resolved_case())
-                self.assertIs(recovered, original)
-
-    def test_non_review_or_inconsistent_baseline_is_unchanged(self):
-        triggers = resolved_case(self.OTHER)
-        for decision in ("APPROVED", "DENIED"):
-            original = outcome(
-                review_reasons=("clean_biohazard_check_missing",),
-                prediction=row(adjudication=decision),
-            )
-            recovered, _baseline = recover(original, triggers)
-            self.assertIs(recovered, original)
-
-        inconsistent = outcome(
-            review_reasons=("clean_biohazard_check_missing",),
-            trace_decision="APPROVED",
-        )
-        recovered, _baseline = recover(inconsistent, triggers)
-        self.assertIs(recovered, inconsistent)
-
-    def test_adjudicate_returns_schema_typed_row(self):
-        original = outcome(review_reasons=("clean_biohazard_check_missing",))
-        wrapper = ReviewDenialRecoveryAdjudicator(FakeAdjudicator(original))
-
-        recovered = wrapper.adjudicate(resolved_case(self.OTHER))
-
-        self.assertIsInstance(recovered, PredictionRow)
-        self.assertEqual(tuple(recovered.to_dict()), tuple(original.row.to_dict()))
-        self.assertEqual(recovered.confidence, 0.551819438046983)
 
 
 if __name__ == "__main__":
