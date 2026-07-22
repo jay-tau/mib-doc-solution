@@ -12,6 +12,7 @@ ENV BLIS_NUM_THREADS=4 \
     MIB_MAX_WORKERS=4 \
     MKL_NUM_THREADS=4 \
     NUMEXPR_NUM_THREADS=4 \
+    OC_DISABLE_DOT_ACCESS_WARNING=1 \
     OMP_NUM_THREADS=4 \
     OPENBLAS_NUM_THREADS=4 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -35,6 +36,7 @@ COPY requirements.lock /app/requirements.lock
 RUN python3 -m pip install \
       --disable-pip-version-check \
       --no-cache-dir \
+      --no-deps \
       --require-hashes \
       --requirement /app/requirements.lock \
     && groupadd --gid "${APP_GID}" mib \
@@ -48,8 +50,10 @@ RUN python3 -m pip install \
 
 COPY run.sh solution.py /app/
 COPY mib_pipeline /app/mib_pipeline
+COPY third_party_licenses /app/third_party_licenses
 RUN chmod 0555 /app/run.sh /app/solution.py \
     && chmod -R a=rX /app/mib_pipeline \
+    && chmod -R a=rX /app/third_party_licenses \
     && chmod 0444 /app/requirements.lock
 
 USER mib:mib

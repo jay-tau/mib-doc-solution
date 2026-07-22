@@ -105,6 +105,594 @@ class CaseLinkerTests(unittest.TestCase):
         self.assertFalse(result.unresolved)
         self.assertNotIn("Other Person", {item.value for item in result.evidence})
 
+    def test_unique_case_field_survives_multi_applicant_name_scoping(self):
+        evidence = [
+            candidate("applicant_name", "Zed Zarnax", EvidenceType.INTAKE_FORM),
+            candidate(
+                "applicant_name",
+                "Other Person",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Other Person",
+                page=1,
+            ),
+            candidate(
+                "home_world",
+                "Kepler-186f",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Other Person",
+                page=1,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertEqual(linked_case.active_applicant, "Zed Zarnax")
+        self.assertEqual(resolved.value("home_world"), "Kepler-186f")
+
+    def test_case_field_fallback_rejects_conflict_and_foreign_case(self):
+        evidence = [
+            candidate("applicant_name", "Zed Zarnax", EvidenceType.INTAKE_FORM),
+            candidate(
+                "applicant_name",
+                "Other Person",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Other Person",
+                page=1,
+            ),
+            candidate(
+                "home_world",
+                "Kepler-186f",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Other Person",
+                page=1,
+            ),
+            candidate(
+                "home_world",
+                "Mars Dome-7",
+                EvidenceType.SPONSOR_ATTESTATION,
+                applicant_hint="Other Person",
+                page=2,
+            ),
+            candidate(
+                "arrival_date",
+                "2026-07-01",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Other Person",
+                case_hint="MIB-000999",
+                page=3,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertIsNone(resolved.value("home_world"))
+        self.assertIsNone(resolved.value("arrival_date"))
+
+    def test_near_identical_ocr_names_are_clustered_and_best_reading_wins(self):
+        evidence = [
+            candidate(
+                "applicant_name",
+                "Xannax Onitx",
+                confidence=0.67,
+                applicant_hint="Xannax Onitx",
+            ),
+            candidate(
+                "applicant_name",
+                "Xannax Oriix",
+                EvidenceType.BIOMETRIC_SLIP,
+                confidence=0.93,
+                applicant_hint="Xannax Oriix",
+                page=1,
+            ),
+            candidate(
+                "home_world",
+                "Eris Relay",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Xannax Oriix",
+                page=2,
+            ),
+        ]
+
+        result = linked(*evidence)
+
+        self.assertEqual(result.active_applicant, "Xannax Oriix")
+        self.assertFalse(result.unresolved)
+        self.assertIn("Eris Relay", {item.value for item in result.evidence})
+
+    def test_corroborated_sponsor_name_replaces_unrelated_low_confidence_intake(self):
+        sponsor_name = "Aridane Tekrix"
+        registry_name = "Xandane Teknax"
+        damaged_intake_name = "Qorul Xarvara"
+        evidence = [
+            candidate(
+                "applicant_name",
+                sponsor_name,
+                EvidenceType.SPONSOR_ATTESTATION,
+                confidence=0.96,
+                cues=("structured_sponsor_narrative",),
+                applicant_hint=sponsor_name,
+                page=2,
+            ),
+            candidate(
+                "sponsor_id",
+                "SPN-7922",
+                EvidenceType.SPONSOR_ATTESTATION,
+                confidence=0.96,
+                applicant_hint=sponsor_name,
+                page=2,
+            ),
+            candidate(
+                "applicant_name",
+                registry_name,
+                EvidenceType.REGISTRY_EXTRACT,
+                confidence=0.80,
+                applicant_hint=registry_name,
+                page=1,
+            ),
+            candidate(
+                "arrival_date",
+                "2026-06-28",
+                EvidenceType.REGISTRY_EXTRACT,
+                confidence=0.80,
+                applicant_hint=registry_name,
+                page=1,
+            ),
+            candidate(
+                "applicant_name",
+                damaged_intake_name,
+                EvidenceType.INTAKE_FORM,
+                confidence=0.63,
+                applicant_hint=damaged_intake_name,
+            ),
+            candidate(
+                "sponsor_id",
+                "SPN-0000",
+                EvidenceType.INTAKE_FORM,
+                confidence=0.64,
+                applicant_hint=damaged_intake_name,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertEqual(linked_case.active_applicant, sponsor_name)
+        self.assertNotIn(damaged_intake_name, {item.value for item in linked_case.evidence})
+        self.assertEqual(resolved.value("applicant_name"), sponsor_name)
+        self.assertEqual(resolved.value("sponsor_id"), "SPN-7922")
+        self.assertEqual(resolved.value("arrival_date"), "2026-06-28")
+
+    def test_corroboration_filters_nearby_damaged_intake_alias_and_its_fields(self):
+        sponsor_name = "Nexnax Oriul"
+        registry_name = "Nexnax Onul"
+        damaged_intake_name = "Nexnex Ortul"
+        evidence = [
+            candidate(
+                "applicant_name",
+                sponsor_name,
+                EvidenceType.SPONSOR_ATTESTATION,
+                confidence=0.96,
+                cues=("structured_sponsor_narrative",),
+                applicant_hint=sponsor_name,
+                page=1,
+            ),
+            candidate(
+                "sponsor_id",
+                "SPN-3945",
+                EvidenceType.SPONSOR_ATTESTATION,
+                confidence=0.96,
+                applicant_hint=sponsor_name,
+                page=1,
+            ),
+            candidate(
+                "visa_class",
+                "XW-2",
+                EvidenceType.SPONSOR_ATTESTATION,
+                confidence=0.96,
+                applicant_hint=sponsor_name,
+                page=1,
+            ),
+            candidate(
+                "applicant_name",
+                registry_name,
+                EvidenceType.REGISTRY_EXTRACT,
+                confidence=0.92,
+                applicant_hint=registry_name,
+                page=2,
+            ),
+            candidate(
+                "applicant_name",
+                sponsor_name,
+                EvidenceType.BIOMETRIC_SLIP,
+                confidence=0.92,
+                applicant_hint=sponsor_name,
+                page=3,
+            ),
+            candidate(
+                "applicant_name",
+                damaged_intake_name,
+                EvidenceType.INTAKE_FORM,
+                confidence=0.59,
+                applicant_hint=damaged_intake_name,
+            ),
+            candidate(
+                "sponsor_id",
+                "SPN-3845",
+                EvidenceType.INTAKE_FORM,
+                confidence=0.55,
+                applicant_hint=damaged_intake_name,
+            ),
+            candidate(
+                "visa_class",
+                "DIP-1",
+                EvidenceType.INTAKE_FORM,
+                confidence=0.53,
+                applicant_hint=damaged_intake_name,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertEqual(linked_case.active_applicant, sponsor_name)
+        self.assertNotIn("SPN-3845", {item.value for item in linked_case.evidence})
+        self.assertNotIn("DIP-1", {item.value for item in linked_case.evidence})
+        self.assertEqual(resolved.value("sponsor_id"), "SPN-3945")
+        self.assertEqual(resolved.value("visa_class"), "XW-2")
+
+    def test_sponsor_override_requires_support_and_only_low_confidence_intake(self):
+        sponsor = candidate(
+            "applicant_name",
+            "Aridane Tekrix",
+            EvidenceType.SPONSOR_ATTESTATION,
+            confidence=0.96,
+            cues=("structured_sponsor_narrative",),
+            applicant_hint="Aridane Tekrix",
+            page=1,
+        )
+        low_intake = candidate(
+            "applicant_name",
+            "Qorul Xarvara",
+            EvidenceType.INTAKE_FORM,
+            confidence=0.63,
+            applicant_hint="Qorul Xarvara",
+        )
+
+        uncorroborated = linked(sponsor, low_intake)
+        self.assertEqual(uncorroborated.active_applicant, "Qorul Xarvara")
+
+        high_intake = candidate(
+            "applicant_name",
+            "Qorul Xarvara",
+            EvidenceType.INTAKE_FORM,
+            confidence=0.80,
+            applicant_hint="Qorul Xarvara",
+        )
+        registry_support = candidate(
+            "applicant_name",
+            "Xandane Teknax",
+            EvidenceType.REGISTRY_EXTRACT,
+            confidence=0.80,
+            applicant_hint="Xandane Teknax",
+            page=2,
+        )
+        guarded = linked(sponsor, high_intake, registry_support)
+        self.assertEqual(guarded.active_applicant, "Qorul Xarvara")
+
+    def test_superseded_applicant_does_not_scope_away_valid_packet(self):
+        evidence = [
+            candidate(
+                "applicant_name",
+                "Wrong Person",
+                superseded=True,
+                cues=("strikethrough",),
+                applicant_hint="Wrong Person",
+            ),
+            candidate(
+                "applicant_name",
+                "Zed Zarnax",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Zed Zarnax",
+                page=1,
+            ),
+            candidate(
+                "home_world",
+                "Kepler-186f",
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint="Zed Zarnax",
+                page=1,
+            ),
+        ]
+
+        result = linked(*evidence)
+
+        self.assertEqual(result.active_applicant, "Zed Zarnax")
+        self.assertIn("Kepler-186f", {item.value for item in result.evidence})
+
+    def test_same_page_applicant_correction_keeps_other_intake_fields(self):
+        evidence = [
+            candidate(
+                "applicant_name",
+                "Wrong Person",
+                superseded=True,
+                cues=("strikethrough",),
+                applicant_hint="Wrong Person",
+            ),
+            candidate(
+                "home_world",
+                "Mars Dome-7",
+                applicant_hint="Wrong Person",
+            ),
+            candidate(
+                "visa_class",
+                "XW-1",
+                applicant_hint="Wrong Person",
+            ),
+            candidate(
+                "applicant_name",
+                "Zed Zarnax",
+                cues=("correction",),
+                applicant_hint="Zed Zarnax",
+                top=90,
+            ),
+            candidate(
+                "applicant_name",
+                "Zed Zarnax",
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint="Zed Zarnax",
+                page=1,
+            ),
+        ]
+
+        result = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(result)
+
+        self.assertEqual(result.active_applicant, "Zed Zarnax")
+        self.assertEqual(resolved.value("home_world"), "Mars Dome-7")
+        self.assertEqual(resolved.value("visa_class"), "XW-1")
+
+    def test_exact_case_cross_source_name_wins_when_other_scope_is_stable(self):
+        decoy = "Other Person"
+        corroborated = "Zed Zarnax"
+        evidence = [
+            candidate(
+                "applicant_name",
+                decoy,
+                EvidenceType.INTAKE_FORM,
+                applicant_hint=decoy,
+                confidence=0.95,
+            ),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint=corroborated,
+                page=1,
+            ),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint=corroborated,
+                page=2,
+            ),
+            # The same physical risk observation is emitted once with its page
+            # name hint and once as a case-level aggregate. It must not look
+            # like a safety-source change merely because the hint differs.
+            candidate(
+                "risk_flags",
+                "identity_conflict",
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint=corroborated,
+                page=1,
+                top=80,
+            ),
+            candidate(
+                "risk_flags",
+                "identity_conflict",
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint=None,
+                page=1,
+                top=80,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertEqual(linked_case.active_applicant, corroborated)
+        self.assertEqual(resolved.value("applicant_name"), corroborated)
+        self.assertEqual(resolved.value("risk_flags"), "identity_conflict")
+        self.assertNotIn(decoy, {item.value for item in linked_case.evidence})
+
+    def test_cross_source_name_vetoes_a_sponsor_value_change(self):
+        decoy = "Other Person"
+        corroborated = "Zed Zarnax"
+        evidence = [
+            candidate("applicant_name", decoy, applicant_hint=decoy),
+            candidate(
+                "sponsor_id",
+                "SPN-1111",
+                applicant_hint=decoy,
+            ),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint=corroborated,
+                page=1,
+            ),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint=corroborated,
+                page=2,
+            ),
+            candidate(
+                "sponsor_id",
+                "SPN-2222",
+                EvidenceType.SPONSOR_ATTESTATION,
+                applicant_hint=corroborated,
+                page=3,
+            ),
+        ]
+
+        linked_case = linked(*evidence)
+        resolved = EvidencePrecedenceResolver().resolve(linked_case)
+
+        self.assertEqual(linked_case.active_applicant, decoy)
+        self.assertEqual(resolved.value("sponsor_id"), "SPN-1111")
+
+    def test_cross_source_name_vetoes_risk_or_policy_source_changes(self):
+        source_cases = (
+            (
+                "risk_flags",
+                "none",
+                EvidenceType.INTAKE_FORM,
+                EvidenceType.BIOMETRIC_SLIP,
+            ),
+            (
+                "packet_receipt_date",
+                "2026-07-01",
+                EvidenceType.INTAKE_FORM,
+                EvidenceType.REGISTRY_EXTRACT,
+            ),
+            (
+                "adjudication",
+                "NEEDS_REVIEW",
+                EvidenceType.ADJUDICATOR_STAMP,
+                EvidenceType.SIGNED_MANUAL_NOTE,
+            ),
+        )
+        for field_name, value, current_type, alternative_type in source_cases:
+            with self.subTest(field_name=field_name):
+                decoy = "Other Person"
+                corroborated = "Zed Zarnax"
+                linked_case = linked(
+                    candidate("applicant_name", decoy, applicant_hint=decoy),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        EvidenceType.BIOMETRIC_SLIP,
+                        applicant_hint=corroborated,
+                        page=1,
+                    ),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        EvidenceType.REGISTRY_EXTRACT,
+                        applicant_hint=corroborated,
+                        page=2,
+                    ),
+                    candidate(
+                        field_name,
+                        value,
+                        current_type,
+                        applicant_hint=decoy,
+                        page=0,
+                        top=80,
+                    ),
+                    candidate(
+                        field_name,
+                        value,
+                        alternative_type,
+                        applicant_hint=corroborated,
+                        page=3,
+                        top=80,
+                    ),
+                )
+
+                self.assertEqual(linked_case.active_applicant, decoy)
+
+    def test_cross_source_name_requires_only_exact_case_anchors(self):
+        for case_hint in (None, "MIB-000999"):
+            with self.subTest(case_hint=case_hint):
+                decoy = "Other Person"
+                corroborated = "Zed Zarnax"
+                linked_case = linked(
+                    candidate("applicant_name", decoy, applicant_hint=decoy),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        EvidenceType.BIOMETRIC_SLIP,
+                        applicant_hint=corroborated,
+                        case_hint=case_hint,
+                        page=1,
+                    ),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        EvidenceType.REGISTRY_EXTRACT,
+                        applicant_hint=corroborated,
+                        case_hint=case_hint,
+                        page=2,
+                    ),
+                )
+
+                self.assertEqual(linked_case.active_applicant, decoy)
+
+    def test_cross_source_name_requires_distinct_pages_and_evidence_types(self):
+        variants = (
+            (
+                (EvidenceType.BIOMETRIC_SLIP, 1),
+                (EvidenceType.REGISTRY_EXTRACT, 1),
+            ),
+            (
+                (EvidenceType.REGISTRY_EXTRACT, 1),
+                (EvidenceType.REGISTRY_EXTRACT, 2),
+            ),
+        )
+        for first, second in variants:
+            with self.subTest(first=first, second=second):
+                decoy = "Other Person"
+                corroborated = "Zed Zarnax"
+                linked_case = linked(
+                    candidate("applicant_name", decoy, applicant_hint=decoy),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        first[0],
+                        applicant_hint=corroborated,
+                        page=first[1],
+                    ),
+                    candidate(
+                        "applicant_name",
+                        corroborated,
+                        second[0],
+                        applicant_hint=corroborated,
+                        page=second[1],
+                    ),
+                )
+
+                self.assertEqual(linked_case.active_applicant, decoy)
+
+    def test_cross_source_name_rejects_vetoed_support(self):
+        decoy = "Other Person"
+        corroborated = "Zed Zarnax"
+        linked_case = linked(
+            candidate("applicant_name", decoy, applicant_hint=decoy),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.BIOMETRIC_SLIP,
+                applicant_hint=corroborated,
+                page=1,
+            ),
+            candidate(
+                "applicant_name",
+                corroborated,
+                EvidenceType.REGISTRY_EXTRACT,
+                applicant_hint=corroborated,
+                cues=("sample_denial_watermark",),
+                page=2,
+            ),
+        )
+
+        self.assertEqual(linked_case.active_applicant, decoy)
+
     def test_conflicting_visible_case_id_marks_linkage_unresolved(self):
         result = linked(
             candidate(
@@ -148,6 +736,97 @@ class PrecedenceResolverTests(unittest.TestCase):
         self.assertEqual(field.state, FieldState.RESOLVED)
         self.assertEqual(field.value, "paid")
         self.assertEqual(field.winning_evidence.evidence_type, EvidenceType.INTAKE_FORM)
+
+    def test_structured_sponsor_narrative_repairs_two_redundant_fields(self):
+        examples = (
+            ("sponsor_id", "SPN-1111", "SPN-2222"),
+            ("visa_class", "XW-2", "XW-1"),
+        )
+        for field_name, intake_value, sponsor_value in examples:
+            with self.subTest(field_name=field_name):
+                case = linked(
+                    candidate("applicant_name", "Zed Zarnax"),
+                    candidate(field_name, intake_value),
+                    candidate(
+                        field_name,
+                        sponsor_value,
+                        EvidenceType.SPONSOR_ATTESTATION,
+                        page=1,
+                        confidence=0.95,
+                        cues=("structured_sponsor_narrative",),
+                    ),
+                )
+
+                field = EvidencePrecedenceResolver().resolve(case).fields[
+                    field_name
+                ]
+
+                self.assertEqual(field.value, sponsor_value)
+                self.assertEqual(
+                    field.winning_evidence.evidence_type,
+                    EvidenceType.SPONSOR_ATTESTATION,
+                )
+                self.assertIn("sponsor narrative OCR repair", field.reason)
+
+    def test_structured_sponsor_repair_abstains_without_every_safeguard(self):
+        def resolved_value(
+            *,
+            field_name="visa_class",
+            sponsor_value="XW-1",
+            sponsor_confidence=0.95,
+            sponsor_cues=("structured_sponsor_narrative",),
+            sponsor_case="MIB-000001",
+            sponsor_applicant="Zed Zarnax",
+            sponsor_superseded=False,
+            intake_cues=(),
+            extra_sponsor=None,
+        ):
+            evidence = [
+                candidate("applicant_name", "Zed Zarnax"),
+                candidate(field_name, "XW-2", cues=intake_cues),
+                candidate(
+                    field_name,
+                    sponsor_value,
+                    EvidenceType.SPONSOR_ATTESTATION,
+                    page=1,
+                    confidence=sponsor_confidence,
+                    cues=sponsor_cues,
+                    case_hint=sponsor_case,
+                    applicant_hint=sponsor_applicant,
+                    superseded=sponsor_superseded,
+                ),
+            ]
+            if extra_sponsor is not None:
+                evidence.append(
+                    candidate(
+                        field_name,
+                        extra_sponsor,
+                        EvidenceType.SPONSOR_ATTESTATION,
+                        page=2,
+                        confidence=0.95,
+                        cues=("structured_sponsor_narrative",),
+                    )
+                )
+            return EvidencePrecedenceResolver().resolve(
+                linked(*evidence)
+            ).fields[field_name].value
+
+        variants = (
+            {"sponsor_cues": ()},
+            {"sponsor_confidence": 0.89},
+            {"sponsor_case": "MIB-000999"},
+            {"sponsor_applicant": "Other Person"},
+            {"sponsor_superseded": True},
+            {"intake_cues": ("correction",)},
+            {"extra_sponsor": "DIP-1"},
+            {
+                "field_name": "declared_purpose",
+                "sponsor_value": "field repair",
+            },
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertEqual(resolved_value(**variant), "XW-2")
 
     def test_same_rank_conflict_is_contested(self):
         case = linked(

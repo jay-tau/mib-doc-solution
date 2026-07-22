@@ -1,5 +1,8 @@
 import math
+import json
+import re
 import unittest
+from pathlib import Path
 
 from mib_pipeline import (
     CalibrationArtifactError,
@@ -7,6 +10,11 @@ from mib_pipeline import (
     DecisionSignalModel,
     DecisionTrace,
     PinnedIsotonicMap,
+)
+from mib_pipeline.confidence import (
+    PinnedSemanticMap,
+    _primary_bucket,
+    _trace_signature,
 )
 
 
@@ -36,6 +44,61 @@ def artifact(**overrides):
         "probabilities": [0.2, 0.55, 0.8, 0.95],
         "fit_metadata": {
             "method": "isotonic_regression",
+            "target": "emitted_adjudication_is_correct",
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+def semantic_artifact(**overrides):
+    samples = (
+        (
+            trace(
+                "APPROVED",
+                approval=("fee_paid", "strict_approval_bar_cleared"),
+            ),
+            True,
+        ),
+        (
+            trace("DENIED", denial=("barred_sponsor:SPN-0007",)),
+            True,
+        ),
+        (
+            trace(
+                "NEEDS_REVIEW",
+                review=("required_output_unknown:risk_flags", "risk_flags_unknown"),
+            ),
+            False,
+        ),
+    )
+
+    def statistics(key):
+        grouped = {}
+        for sample_trace, correct in samples:
+            rendered = key(sample_trace)
+            counts = grouped.setdefault(rendered, [0, 0])
+            counts[0] += int(correct)
+            counts[1] += 1
+        return grouped
+
+    value = {
+        "schema_version": 2,
+        "artifact_id": "test-semantic-map-v2",
+        "model": {
+            "global_statistics": [2, 3],
+            "decision_statistics": statistics(lambda item: item.decision),
+            "primary_bucket_statistics": statistics(_primary_bucket),
+            "trace_signature_statistics": statistics(_trace_signature),
+            "smoothing_strengths": {
+                "decision_to_global": 8,
+                "bucket_to_decision": 2,
+                "signature_to_bucket": 2,
+            },
+            "probability_clip": [0.02, 0.98],
+        },
+        "fit_metadata": {
+            "method": "hierarchical_empirical_bayes_semantic_trace",
             "target": "emitted_adjudication_is_correct",
         },
     }
@@ -104,6 +167,69 @@ class PinnedIsotonicMapTests(unittest.TestCase):
         for value in malformed:
             with self.subTest(value=value), self.assertRaises(CalibrationArtifactError):
                 PinnedIsotonicMap.from_mapping(value)
+
+
+class PinnedSemanticMapTests(unittest.TestCase):
+    def test_semantic_hierarchy_uses_signature_then_bucket_then_decision(self):
+        mapping = PinnedSemanticMap.from_mapping(semantic_artifact())
+        fitted_signature = trace(
+            "NEEDS_REVIEW",
+            review=("required_output_unknown:risk_flags", "risk_flags_unknown"),
+        )
+        unseen_signature_in_fitted_bucket = trace(
+            "NEEDS_REVIEW",
+            review=("required_output_unknown:fee_status", "fee_status_unknown"),
+        )
+
+        fitted = mapping.predict(fitted_signature)
+        bucket_fallback = mapping.predict(unseen_signature_in_fitted_bucket)
+
+        self.assertLess(fitted, bucket_fallback)
+        self.assertTrue(0.02 <= fitted <= 0.98)
+        self.assertTrue(0.02 <= bucket_fallback <= 0.98)
+
+    def test_case_specific_reason_values_collapse_to_one_signature(self):
+        first = trace("DENIED", denial=("barred_sponsor:SPN-0007",))
+        second = trace("DENIED", denial=("barred_sponsor:SPN-9090",))
+        first_world = trace("DENIED", denial=("embargoed_home_world:Eris Relay",))
+        second_world = trace(
+            "DENIED", denial=("embargoed_home_world:TRAPPIST-1e",)
+        )
+
+        self.assertEqual(_trace_signature(first), _trace_signature(second))
+        self.assertEqual(_primary_bucket(first), _primary_bucket(second))
+        self.assertEqual(_trace_signature(first_world), _trace_signature(second_world))
+
+    def test_rejects_inconsistent_or_identity_bearing_semantic_artifacts(self):
+        inconsistent = semantic_artifact()
+        inconsistent["model"]["global_statistics"] = [1, 3]
+        identity_key = semantic_artifact()
+        signatures = identity_key["model"]["trace_signature_statistics"]
+        old_key = next(iter(signatures))
+        signatures[f"{old_key}|case=MIB-000001"] = signatures.pop(old_key)
+        invalid_strength = semantic_artifact()
+        invalid_strength["model"]["smoothing_strengths"][
+            "signature_to_bucket"
+        ] = math.nan
+
+        for value in (inconsistent, identity_key, invalid_strength):
+            with self.subTest(value=value), self.assertRaises(CalibrationArtifactError):
+                PinnedSemanticMap.from_mapping(value)
+
+    def test_pinned_runtime_artifact_contains_no_identity_values(self):
+        artifact_path = (
+            Path(__file__).resolve().parents[1]
+            / "mib_pipeline"
+            / "artifacts"
+            / "confidence_calibration.json"
+        )
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        rendered = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertIsNone(re.search(r"\bMIB-[0-9]{6}\b", rendered, re.IGNORECASE))
+        self.assertIsNone(re.search(r"\bSPN-[0-9]{4}\b", rendered, re.IGNORECASE))
+        self.assertIsNone(re.search(r"\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b", rendered))
 
 
 class DecisionSignalTests(unittest.TestCase):
